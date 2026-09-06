@@ -1,59 +1,71 @@
-version: '3.8'
-
 services:
-  # CPU version - good for testing and moderate usage
-  katago-server-cpu:
-    image: ghcr.io/stubbi/katago-server:latest
+  # CPU image with KataGo and the standard 28-block network bundled.
+  katago-server:
+    image: ghcr.io/goban-app/katago-server:latest
     # Or build locally:
     # build:
     #   context: .
     #   target: cpu
     ports:
       - "2718:2718"
-    # Uncomment to mount custom config:
-    # volumes:
-    #   - ./config.toml:/app/config.toml:ro
-    #   - ./gtp_config.cfg:/app/gtp_config.cfg:ro
     environment:
-      - RUST_LOG=info
+      RUST_LOG: info
+      # KATAGO_SERVER_LOG_FORMAT: json
+      # KATAGO_SERVER_CORS_ALLOWED_ORIGINS: https://goban.app
+      # KATAGO_MOVE_TIMEOUT_SECS: "60"
+      # KATAGO_DEFAULT_MAX_VISITS: "50"
+      # KATAGO_MAX_VISITS_LIMIT: "2000"
+    # volumes:
+    #   - ./analysis_config.cfg:/app/analysis_config.cfg:ro
     restart: unless-stopped
+    stop_grace_period: 30s
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:2718/api/v1/health"]
+      test: ["CMD", "/app/katago-server", "healthcheck"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 300s
 
-  # GPU version - requires nvidia-docker
-  # Uncomment to use GPU-accelerated version
+  # GPU image (NVIDIA Container Toolkit required).
   # katago-server-gpu:
-  #   image: ghcr.io/stubbi/katago-server:gpu
-  #   # Or build locally:
-  #   # build:
-  #   #   context: .
-  #   #   target: gpu
+  #   image: ghcr.io/goban-app/katago-server:latest-gpu
   #   ports:
   #     - "2719:2718"
-  #   runtime: nvidia
   #   environment:
-  #     - RUST_LOG=info
-  #     - NVIDIA_VISIBLE_DEVICES=all
+  #     RUST_LOG: info
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
   #   restart: unless-stopped
+  #   stop_grace_period: 30s
   #   healthcheck:
-  #     test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:2718/api/v1/health"]
+  #     test: ["CMD", "/app/katago-server", "healthcheck"]
   #     interval: 30s
   #     timeout: 10s
   #     retries: 3
-  #     start_period: 10s
+  #     start_period: 120s
 
-  # Minimal version with custom model
-  # Uncomment and configure to use your own models
+  # Minimal image: bring your own KataGo, network and analysis config.
   # katago-server-custom:
-  #   image: ghcr.io/stubbi/katago-server:latest-minimal
+  #   image: ghcr.io/goban-app/katago-server:latest-minimal
   #   ports:
   #     - "2720:2718"
   #   volumes:
+  #     # must contain katago, model.bin.gz, analysis_config.cfg
   #     - /path/to/your/models:/models:ro
   #   environment:
-  #     - RUST_LOG=info
+  #     RUST_LOG: info
+  #     KATAGO_KATAGO_PATH: /models/katago
+  #     KATAGO_MODEL_PATH: /models/model.bin.gz
+  #     KATAGO_CONFIG_PATH: /models/analysis_config.cfg
   #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD", "/app/katago-server", "healthcheck"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 300s

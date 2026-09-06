@@ -1,16 +1,2 @@
-# CODEOWNERS file for katago-server
-# This file defines who owns and must approve changes to specific parts of the codebase.
-# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
-
-# Default owner for everything in the repo
-# This ensures all PRs require your approval
+# Every change needs a review from the maintainers.
 * @stubbi
-
-# Specific ownership for critical configuration files
-/.github/ @stubbi
-/Dockerfile* @stubbi
-/Cargo.toml @stubbi
-/Cargo.lock @stubbi
-
-# Source code
-/src/ @stubbi

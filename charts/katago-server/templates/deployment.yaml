@@ -47,134 +47,174 @@ spec:
       {{- end }}
       {{- if .Values.config.customModel.enabled }}
       initContainers:
-      - name: download-model
-        image: {{ .Values.config.customModel.initImage }}
-        command:
-        - sh
-        - -c
-        - |
-          set -e
-          echo "Downloading custom model from {{ .Values.config.customModel.url }}"
-          wget -O /models/{{ .Values.config.customModel.filename }} "{{ .Values.config.customModel.url }}"
-          {{- if .Values.config.customModel.sha256sum }}
-          echo "Verifying checksum..."
-          echo "{{ .Values.config.customModel.sha256sum }}  /models/{{ .Values.config.customModel.filename }}" | sha256sum -c -
-          {{- end }}
-          echo "Model downloaded successfully to /models/{{ .Values.config.customModel.filename }}"
-          ls -lh /models/
-        volumeMounts:
-        - name: custom-model
-          mountPath: /models
-        resources:
-          {{- toYaml .Values.config.customModel.initResources | nindent 10 }}
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-            - ALL
-          runAsNonRoot: true
-          runAsUser: 1000
+        - name: download-model
+          image: {{ .Values.config.customModel.initImage }}
+          command:
+            - sh
+            - -ec
+            - |
+              echo "Downloading model from {{ .Values.config.customModel.url }}"
+              wget -O /models/{{ .Values.config.customModel.filename }} "{{ .Values.config.customModel.url }}"
+              {{- if .Values.config.customModel.sha256sum }}
+              echo "{{ .Values.config.customModel.sha256sum }}  /models/{{ .Values.config.customModel.filename }}" | sha256sum -c -
+              {{- end }}
+              ls -lh /models/
+          volumeMounts:
+            - name: custom-model
+              mountPath: /models
+          resources:
+            {{- toYaml .Values.config.customModel.initResources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 1000
       {{- end }}
       containers:
-      - name: {{ .Chart.Name }}
-        securityContext:
-          {{- toYaml .Values.securityContext | nindent 12 }}
-        image: {{ include "katago-server.image" . }}
-        imagePullPolicy: {{ .Values.image.pullPolicy }}
-        ports:
-        - name: http
-          containerPort: {{ .Values.service.targetPort }}
-          protocol: TCP
-        env:
-        - name: RUST_LOG
-          value: {{ .Values.config.logLevel | quote }}
-        - name: KATAGO_MOVE_TIMEOUT_SECS
-          value: {{ .Values.config.katago.moveTimeoutSecs | quote }}
-        {{- if .Values.config.customModel.enabled }}
-        - name: KATAGO_MODEL_PATH
-          value: /app/models/{{ .Values.config.customModel.filename }}
-        {{- end }}
-        {{- if .Values.config.customConfig }}
-        - name: KATAGO_SERVER__CONFIG_PATH
-          value: /config/config.toml
-        {{- end }}
-        {{- with .Values.env }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
-        {{- with .Values.envFrom }}
-        envFrom:
-          {{- toYaml . | nindent 8 }}
-        {{- end }}
-        livenessProbe:
-          {{- toYaml .Values.livenessProbe | nindent 10 }}
-        readinessProbe:
-          {{- toYaml .Values.readinessProbe | nindent 10 }}
-        startupProbe:
-          {{- toYaml .Values.startupProbe | nindent 10 }}
-        {{- if or (hasKey .Values.resources "limits") (hasKey .Values.resources "requests") .Values.gpu.enabled }}
-        resources:
-          {{- if or (hasKey .Values.resources "limits") .Values.gpu.enabled }}
-          limits:
-            {{- if .Values.gpu.enabled }}
-            {{- if eq .Values.gpu.vendor "nvidia" }}
-            nvidia.com/gpu: {{ .Values.gpu.count }}
-            {{- else if eq .Values.gpu.vendor "amd" }}
-            amd.com/gpu: {{ .Values.gpu.count }}
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: {{ include "katago-server.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.config.logLevel | quote }}
+            - name: KATAGO_SERVER_PORT
+              value: {{ .Values.service.targetPort | quote }}
+            - name: KATAGO_MOVE_TIMEOUT_SECS
+              value: {{ .Values.config.katago.moveTimeoutSecs | quote }}
+            {{- with .Values.config.logFormat }}
+            - name: KATAGO_SERVER_LOG_FORMAT
+              value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.config.corsAllowedOrigins }}
+            - name: KATAGO_SERVER_CORS_ALLOWED_ORIGINS
+              value: {{ join "," . | quote }}
             {{- end }}
-            {{- with .Values.resources.limits }}
-            {{- range $key, $value := . }}
-            {{ $key }}: {{ $value }}
+            {{- if not (kindIs "invalid" .Values.config.maxConcurrentRequests) }}
+            - name: KATAGO_SERVER_MAX_CONCURRENT_REQUESTS
+              value: {{ .Values.config.maxConcurrentRequests | quote }}
             {{- end }}
+            {{- if not (kindIs "invalid" .Values.config.requestTimeoutSecs) }}
+            - name: KATAGO_SERVER_REQUEST_TIMEOUT_SECS
+              value: {{ .Values.config.requestTimeoutSecs | quote }}
             {{- end }}
-          {{- end }}
-          {{- with .Values.resources.requests }}
-          requests:
+            {{- with .Values.config.katago.path }}
+            - name: KATAGO_KATAGO_PATH
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.config.customModel.enabled }}
+            - name: KATAGO_MODEL_PATH
+              value: /app/models/{{ .Values.config.customModel.filename }}
+            {{- else if .Values.config.katago.modelPath }}
+            - name: KATAGO_MODEL_PATH
+              value: {{ .Values.config.katago.modelPath | quote }}
+            {{- end }}
+            {{- with .Values.config.katago.humanModelPath }}
+            - name: KATAGO_HUMAN_MODEL_PATH
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.katago.configPath }}
+            - name: KATAGO_CONFIG_PATH
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if not (kindIs "invalid" .Values.config.katago.defaultMaxVisits) }}
+            - name: KATAGO_DEFAULT_MAX_VISITS
+              value: {{ .Values.config.katago.defaultMaxVisits | quote }}
+            {{- end }}
+            {{- if not (kindIs "invalid" .Values.config.katago.maxVisitsLimit) }}
+            - name: KATAGO_MAX_VISITS_LIMIT
+              value: {{ .Values.config.katago.maxVisitsLimit | quote }}
+            {{- end }}
+            {{- if not (kindIs "invalid" .Values.config.katago.maxRestartAttempts) }}
+            - name: KATAGO_MAX_RESTART_ATTEMPTS
+              value: {{ .Values.config.katago.maxRestartAttempts | quote }}
+            {{- end }}
+            {{- if .Values.config.customConfig }}
+            - name: KATAGO_CONFIG_FILE
+              value: /config/config.toml
+            {{- end }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.envFrom }}
+          envFrom:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-        {{- end }}
-        volumeMounts:
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          startupProbe:
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          {{- if or (hasKey .Values.resources "limits") (hasKey .Values.resources "requests") .Values.gpu.enabled }}
+          resources:
+            {{- if or (hasKey .Values.resources "limits") .Values.gpu.enabled }}
+            limits:
+              {{- if .Values.gpu.enabled }}
+              {{- if eq .Values.gpu.vendor "nvidia" }}
+              nvidia.com/gpu: {{ .Values.gpu.count }}
+              {{- else if eq .Values.gpu.vendor "amd" }}
+              amd.com/gpu: {{ .Values.gpu.count }}
+              {{- end }}
+              {{- end }}
+              {{- range $key, $value := .Values.resources.limits }}
+              {{ $key }}: {{ $value }}
+              {{- end }}
+            {{- end }}
+            {{- with .Values.resources.requests }}
+            requests:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+          {{- end }}
+          volumeMounts:
+            {{- if .Values.config.customConfig }}
+            - name: config
+              mountPath: /config
+              readOnly: true
+            {{- end }}
+            {{- if .Values.config.katago.analysisConfig }}
+            - name: analysis-config
+              mountPath: /app/analysis_config.cfg
+              subPath: analysis_config.cfg
+              readOnly: true
+            {{- end }}
+            {{- if .Values.config.customModel.enabled }}
+            - name: custom-model
+              mountPath: /app/models
+              readOnly: true
+            {{- end }}
+            {{- with .Values.volumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.lifecycle }}
+          lifecycle:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
         {{- if .Values.config.customConfig }}
         - name: config
-          mountPath: /config
-          readOnly: true
+          configMap:
+            name: {{ include "katago-server.fullname" . }}-config
         {{- end }}
         {{- if .Values.config.katago.analysisConfig }}
         - name: analysis-config
-          mountPath: /app/analysis_config.cfg
-          subPath: analysis_config.cfg
-          readOnly: true
+          configMap:
+            name: {{ include "katago-server.fullname" . }}-analysis-config
         {{- end }}
         {{- if .Values.config.customModel.enabled }}
         - name: custom-model
-          mountPath: /app/models
-          readOnly: true
+          emptyDir: {}
         {{- end }}
-        {{- with .Values.volumeMounts }}
+        {{- with .Values.volumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-        {{- with .Values.lifecycle }}
-        lifecycle:
-          {{- toYaml . | nindent 10 }}
-        {{- end }}
-      volumes:
-      {{- if .Values.config.customConfig }}
-      - name: config
-        configMap:
-          name: {{ include "katago-server.fullname" . }}-config
-      {{- end }}
-      {{- if .Values.config.katago.analysisConfig }}
-      - name: analysis-config
-        configMap:
-          name: {{ include "katago-server.fullname" . }}-analysis-config
-      {{- end }}
-      {{- if .Values.config.customModel.enabled }}
-      - name: custom-model
-        emptyDir: {}
-      {{- end }}
-      {{- with .Values.volumes }}
-      {{- toYaml . | nindent 6 }}
-      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

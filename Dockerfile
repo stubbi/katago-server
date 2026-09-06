@@ -1,386 +1,207 @@
+# syntax=docker/dockerfile:1.7
 # ==============================================================================
-# Multi-stage Dockerfile for katago-server
-# Supports multiple build targets: base, cpu, gpu, minimal
-# Usage: docker build --target <target> -t katago-server:<tag> .
+# katago-server images
+#
+#   target      contents                                   platforms
+#   base        server binary only                         amd64, arm64
+#   minimal     server binary, expects /models/* mounted   amd64, arm64
+#   cpu         + KataGo (Eigen) + standard network        amd64, arm64
+#   human-cpu   + KataGo (Eigen) + Human SL network        amd64, arm64
+#   combo-cpu   + KataGo (Eigen) + both networks           amd64, arm64
+#   gpu         + KataGo (CUDA)  + standard network        amd64
+#   human-gpu   + KataGo (CUDA)  + Human SL network        amd64
+#   combo-gpu   + KataGo (CUDA)  + both networks           amd64
+#
+#   docker build --target cpu -t katago-server:cpu .
 # ==============================================================================
 
-# ------------------------------------------------------------------------------
-# Stage: chef-planner
-# Prepares the recipe for cargo-chef
-# ------------------------------------------------------------------------------
-FROM lukemathwalker/cargo-chef:latest-rust-1.83-slim AS chef-planner
+ARG RUST_VERSION=1.98
+ARG KATAGO_VERSION=v1.18.2
+ARG CUDA_VERSION=12.4.1
+ARG STANDARD_MODEL=kata1-b28c512nbt-s12043015936-d5616446734.bin.gz
+ARG HUMAN_MODEL=b18c384nbt-humanv0.bin.gz
+# Optional SHA-256 checksums for the downloaded networks (verified when non-empty)
+ARG STANDARD_MODEL_SHA256=""
+ARG HUMAN_MODEL_SHA256=""
 
+# ------------------------------------------------------------------------------
+# Rust build: a statically linked musl binary, so it runs unchanged on the
+# Debian and Ubuntu/CUDA runtime images regardless of their glibc version.
+# cargo-chef caches the dependency build.
+# ------------------------------------------------------------------------------
+FROM lukemathwalker/cargo-chef:latest-rust-${RUST_VERSION}-slim AS chef
+RUN apt-get update && apt-get install -y --no-install-recommends musl-tools \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup target add "$(uname -m)-unknown-linux-musl"
 WORKDIR /app
 
+FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-
 RUN cargo chef prepare --recipe-path recipe.json
 
-# ------------------------------------------------------------------------------
-# Stage: rust-builder
-# Builds the Rust katago-server binary using cargo-chef for optimal caching
-# ------------------------------------------------------------------------------
-FROM lukemathwalker/cargo-chef:latest-rust-1.83-slim AS rust-builder
-
-WORKDIR /app
-
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Build dependencies using cargo-chef (cached unless dependencies change)
-COPY --from=chef-planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
-
-# Copy source code
+FROM chef AS rust-builder
+ARG GIT_SHA=""
+ENV GIT_SHA=${GIT_SHA}
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --locked --target "$(uname -m)-unknown-linux-musl" --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-
-# Build the actual application (only this layer rebuilds when code changes)
-RUN cargo build --release
-
-# ------------------------------------------------------------------------------
-# Stage: base
-# Minimal runtime with just the katago-server binary
-# ------------------------------------------------------------------------------
-FROM debian:bookworm-slim AS base
-
-WORKDIR /app
-
-# Install minimal runtime dependencies
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    libgomp1 \
-    wget \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy the binary from builder
-COPY --from=rust-builder /app/target/release/katago-server /app/
-
-# Copy config templates
-COPY config.toml.example /app/config.toml.example
-COPY analysis_config.cfg.example /app/analysis_config.cfg.example
-
-EXPOSE 2718
-ENV RUST_LOG=debug
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:2718/api/v1/health || exit 1
-
-CMD ["./katago-server"]
+RUN cargo build --release --locked --bin katago-server --target "$(uname -m)-unknown-linux-musl" \
+    && cp "target/$(uname -m)-unknown-linux-musl/release/katago-server" /app/katago-server-static
 
 # ------------------------------------------------------------------------------
-# Stage: katago-cpu-builder
-# Builds KataGo with CPU backend (Eigen + AVX2)
+# KataGo, CPU backend (Eigen). AVX2 only on x86_64.
 # ------------------------------------------------------------------------------
 FROM debian:bookworm-slim AS katago-cpu-builder
-
-RUN apt-get update && apt-get install -y \
-    git \
-    build-essential \
-    cmake \
-    libeigen3-dev \
-    libzip-dev \
-    libssl-dev \
+ARG KATAGO_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git build-essential cmake libeigen3-dev libzip-dev zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /build
-
-# Clone specific version (v1.16.4 for CUDA 12 support and human-style model support)
-RUN git clone --depth 1 -b v1.16.4 https://github.com/lightvector/KataGo.git
-
+RUN git clone --depth 1 --branch "${KATAGO_VERSION}" https://github.com/lightvector/KataGo.git
 WORKDIR /build/KataGo/cpp
-
-# Build for CPU (Eigen), AVX2 only for amd64
-RUN ARCH=$(uname -m) && \
-    if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then \
-    cmake . -DUSE_BACKEND=EIGEN -DUSE_AVX2=1; \
-    else \
-    cmake . -DUSE_BACKEND=EIGEN -DUSE_AVX2=0; \
-    fi && \
-    make -j"$(nproc)" && \
-    strip katago
-
-# ------------------------------------------------------------------------------
-# Stage: katago-gpu-builder
-# Builds KataGo with CUDA backend
-# Using CUDA 12.4 devel for building (runtime uses smaller cudnn-runtime image)
-# CUDA 12.4 requires driver >= 525.60.13 (RTX 3080 compatible)
-# ------------------------------------------------------------------------------
-FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS katago-gpu-builder
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update && apt-get install -y \
-    git \
-    build-essential \
-    cmake \
-    libzip-dev \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /build
-
-# Clone specific version (v1.16.4 for CUDA 12 support and human-style model support)
-RUN git clone --depth 1 -b v1.16.4 https://github.com/lightvector/KataGo.git
-
-WORKDIR /build/KataGo/cpp
-
-# Build for CUDA (cuDNN headers already included in devel image)
-RUN cmake . -DUSE_BACKEND=CUDA \
+RUN if [ "$(uname -m)" = "x86_64" ]; then AVX2=1; else AVX2=0; fi \
+    && cmake . -DUSE_BACKEND=EIGEN -DUSE_AVX2=${AVX2} -DCMAKE_BUILD_TYPE=Release \
     && make -j"$(nproc)" \
     && strip katago
 
 # ------------------------------------------------------------------------------
-# Stage: cpu
-# CPU variant with KataGo binary and model
+# KataGo, CUDA backend
 # ------------------------------------------------------------------------------
-FROM base AS cpu
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04 AS katago-gpu-builder
+ARG KATAGO_VERSION
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git build-essential cmake libzip-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+RUN git clone --depth 1 --branch "${KATAGO_VERSION}" https://github.com/lightvector/KataGo.git
+WORKDIR /build/KataGo/cpp
+RUN cmake . -DUSE_BACKEND=CUDA -DCMAKE_BUILD_TYPE=Release \
+    && make -j"$(nproc)" \
+    && strip katago
 
-ARG KATAGO_MODEL=kata1-b28c512nbt-s12043015936-d5616446734.bin.gz
-ENV KATAGO_MODEL=${KATAGO_MODEL}
+# ------------------------------------------------------------------------------
+# Runtime base (Debian): non-root user, server binary, health check
+# ------------------------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime-base
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl libgomp1 libzip4 zlib1g \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1000 katago \
+    && useradd --uid 1000 --gid 1000 --create-home --shell /usr/sbin/nologin katago
+WORKDIR /app
+COPY --from=rust-builder /app/katago-server-static /app/katago-server
+COPY config.toml.example analysis_config.cfg.example /app/
+RUN chown -R katago:katago /app
+ENV RUST_LOG=info \
+    KATAGO_SERVER_HOST=:: \
+    KATAGO_SERVER_PORT=2718
+EXPOSE 2718
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
+    CMD ["/app/katago-server", "healthcheck"]
+ENTRYPOINT ["/app/katago-server"]
 
-# Install runtime dependencies for KataGo
-RUN set -ex; \
-    apt-get update; \
-    if apt-get install -y --no-install-recommends libzip5; then :; \
-    else apt-get install -y --no-install-recommends libzip4; \
-    ln -s /usr/lib/$(uname -m)-linux-gnu/libzip.so.4 /usr/lib/$(uname -m)-linux-gnu/libzip.so.5; \
-    fi; \
-    rm -rf /var/lib/apt/lists/*
+FROM runtime-base AS base
+USER 1000:1000
 
-# Copy KataGo binary
+FROM runtime-base AS minimal
+ENV KATAGO_KATAGO_PATH=/models/katago \
+    KATAGO_MODEL_PATH=/models/model.bin.gz \
+    KATAGO_CONFIG_PATH=/models/analysis_config.cfg
+VOLUME ["/models"]
+USER 1000:1000
+
+# ------------------------------------------------------------------------------
+# CPU variants
+# ------------------------------------------------------------------------------
+FROM runtime-base AS cpu-base
 COPY --from=katago-cpu-builder /build/KataGo/cpp/katago /app/katago
+COPY docker-setup.sh /app/docker-setup.sh
 
-# Copy configuration
+FROM cpu-base AS cpu
+ARG STANDARD_MODEL
+ARG STANDARD_MODEL_SHA256
+ENV KATAGO_MODEL=${STANDARD_MODEL} \
+    KATAGO_MODEL_SHA256=${STANDARD_MODEL_SHA256}
 COPY analysis_config.cfg.cpu /app/analysis_config.cfg
-COPY docker-setup.sh /app/
+RUN ./docker-setup.sh && chown -R katago:katago /app
+USER 1000:1000
 
-# Download model and configure
-RUN chmod +x docker-setup.sh && ./docker-setup.sh
-
-# Create log directory with correct ownership for non-root user
-RUN mkdir -p /app/analysis_logs && chown 1000:1000 /app/analysis_logs
-
-# ------------------------------------------------------------------------------
-# Stage: gpu
-# GPU variant with CUDA-enabled KataGo binary and model
-# Using CUDA 12.4 cudnn-runtime for smaller image (~2GB vs ~5.5GB with lib copying)
-# CUDA 12.4 requires driver >= 525.60.13 (RTX 3080 compatible)
-# ------------------------------------------------------------------------------
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS gpu
-
-ARG KATAGO_MODEL=kata1-b28c512nbt-s12043015936-d5616446734.bin.gz
-ENV KATAGO_MODEL=${KATAGO_MODEL}
-
-WORKDIR /app
-
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libzip4 \
-    ca-certificates \
-    wget \
-    libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy binaries
-COPY --from=rust-builder /app/target/release/katago-server /app/
-COPY --from=katago-gpu-builder /build/KataGo/cpp/katago /app/katago
-
-# Copy configurations
-COPY config.toml.example /app/config.toml.example
-COPY analysis_config.cfg.gpu /app/analysis_config.cfg
-COPY docker-setup.sh /app/
-
-# Download model and configure
-RUN chmod +x docker-setup.sh && ./docker-setup.sh
-
-# Create log directory with correct ownership for non-root user
-RUN mkdir -p /app/analysis_logs && chown 1000:1000 /app/analysis_logs
-
-EXPOSE 2718
-ENV RUST_LOG=debug
-# Bind to IPv6 wildcard to support both IPv4 and IPv6 (required for Salad Cloud)
-ENV KATAGO_SERVER_HOST="::"
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:2718/api/v1/health || exit 1
-
-CMD ["./katago-server"]
-
-# ------------------------------------------------------------------------------
-# Stage: human-cpu
-# CPU variant with Human SL network for human-style analysis
-# ------------------------------------------------------------------------------
-FROM base AS human-cpu
-
-ARG KATAGO_MODEL=b18c384nbt-humanv0.bin.gz
-ENV KATAGO_MODEL=${KATAGO_MODEL}
-
-# Install runtime dependencies for KataGo
-RUN set -ex; \
-    apt-get update; \
-    if apt-get install -y --no-install-recommends libzip5; then :; \
-    else apt-get install -y --no-install-recommends libzip4; \
-    ln -s /usr/lib/$(uname -m)-linux-gnu/libzip.so.4 /usr/lib/$(uname -m)-linux-gnu/libzip.so.5; \
-    fi; \
-    rm -rf /var/lib/apt/lists/*
-
-# Copy KataGo binary
-COPY --from=katago-cpu-builder /build/KataGo/cpp/katago /app/katago
-
-# Copy configuration (human-specific)
+FROM cpu-base AS human-cpu
+ARG HUMAN_MODEL
+ARG HUMAN_MODEL_SHA256
+ENV KATAGO_MODEL=${HUMAN_MODEL} \
+    KATAGO_MODEL_SHA256=${HUMAN_MODEL_SHA256}
 COPY analysis_config.cfg.human-cpu /app/analysis_config.cfg
-COPY docker-setup.sh /app/
+RUN ./docker-setup.sh && chown -R katago:katago /app
+USER 1000:1000
 
-# Download model and configure
-RUN chmod +x docker-setup.sh && ./docker-setup.sh
-
-# Create log directory with correct ownership for non-root user
-RUN mkdir -p /app/analysis_logs && chown 1000:1000 /app/analysis_logs
-
-# ------------------------------------------------------------------------------
-# Stage: human-gpu
-# GPU variant with Human SL network for human-style analysis
-# Using CUDA 12.4 cudnn-runtime for smaller image (~2GB vs ~5.5GB with lib copying)
-# CUDA 12.4 requires driver >= 525.60.13 (RTX 3080 compatible)
-# ------------------------------------------------------------------------------
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS human-gpu
-
-ARG KATAGO_MODEL=b18c384nbt-humanv0.bin.gz
-ENV KATAGO_MODEL=${KATAGO_MODEL}
-
-WORKDIR /app
-
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libzip4 \
-    ca-certificates \
-    wget \
-    libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy binaries
-COPY --from=rust-builder /app/target/release/katago-server /app/
-COPY --from=katago-gpu-builder /build/KataGo/cpp/katago /app/katago
-
-# Copy configurations (human-specific)
-COPY config.toml.example /app/config.toml.example
-COPY analysis_config.cfg.human-gpu /app/analysis_config.cfg
-COPY docker-setup.sh /app/
-
-# Download model and configure
-RUN chmod +x docker-setup.sh && ./docker-setup.sh
-
-# Create log directory with correct ownership for non-root user
-RUN mkdir -p /app/analysis_logs && chown 1000:1000 /app/analysis_logs
-
-EXPOSE 2718
-ENV RUST_LOG=debug
-# Bind to IPv6 wildcard to support both IPv4 and IPv6 (required for Salad Cloud)
-ENV KATAGO_SERVER_HOST="::"
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:2718/api/v1/health || exit 1
-
-CMD ["./katago-server"]
-
-# ------------------------------------------------------------------------------
-# Stage: combo-cpu
-# CPU variant with both standard and human models
-# Standard model is used by default; human model available via overrideSettings
-# ------------------------------------------------------------------------------
-FROM base AS combo-cpu
-
-ARG KATAGO_MODEL=kata1-b28c512nbt-s12043015936-d5616446734.bin.gz
-ARG KATAGO_HUMAN_MODEL=b18c384nbt-humanv0.bin.gz
-ENV KATAGO_MODEL=${KATAGO_MODEL}
-ENV KATAGO_HUMAN_MODEL=${KATAGO_HUMAN_MODEL}
-ENV KATAGO_HUMAN_MODEL_PATH="./${KATAGO_HUMAN_MODEL}"
-
-# Install runtime dependencies for KataGo
-RUN set -ex; \
-    apt-get update; \
-    if apt-get install -y --no-install-recommends libzip5; then :; \
-    else apt-get install -y --no-install-recommends libzip4; \
-    ln -s /usr/lib/$(uname -m)-linux-gnu/libzip.so.4 /usr/lib/$(uname -m)-linux-gnu/libzip.so.5; \
-    fi; \
-    rm -rf /var/lib/apt/lists/*
-
-# Copy KataGo binary
-COPY --from=katago-cpu-builder /build/KataGo/cpp/katago /app/katago
-
-# Copy configuration
+FROM cpu-base AS combo-cpu
+ARG STANDARD_MODEL
+ARG STANDARD_MODEL_SHA256
+ARG HUMAN_MODEL
+ARG HUMAN_MODEL_SHA256
+ENV KATAGO_MODEL=${STANDARD_MODEL} \
+    KATAGO_MODEL_SHA256=${STANDARD_MODEL_SHA256} \
+    KATAGO_HUMAN_MODEL=${HUMAN_MODEL} \
+    KATAGO_HUMAN_MODEL_SHA256=${HUMAN_MODEL_SHA256}
 COPY analysis_config.cfg.combo-cpu /app/analysis_config.cfg
-COPY docker-setup.sh /app/
-
-# Download both models and configure
-RUN chmod +x docker-setup.sh && ./docker-setup.sh
-
-# Create log directory with correct ownership for non-root user
-RUN mkdir -p /app/analysis_logs && chown 1000:1000 /app/analysis_logs
+RUN ./docker-setup.sh && chown -R katago:katago /app
+USER 1000:1000
 
 # ------------------------------------------------------------------------------
-# Stage: combo-gpu
-# GPU variant with both standard and human models
-# Standard model is used by default; human model available via overrideSettings
-# Using CUDA 12.4 cudnn-runtime for smaller image (~2.4GB vs ~5.5GB with lib copying)
-# CUDA 12.4 requires driver >= 525.60.13 (RTX 3080 compatible)
+# GPU runtime base (CUDA runtime image, ~2GB) and variants
 # ------------------------------------------------------------------------------
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS combo-gpu
-
-ARG KATAGO_MODEL=kata1-b28c512nbt-s12043015936-d5616446734.bin.gz
-ARG KATAGO_HUMAN_MODEL=b18c384nbt-humanv0.bin.gz
-ENV KATAGO_MODEL=${KATAGO_MODEL}
-ENV KATAGO_HUMAN_MODEL=${KATAGO_HUMAN_MODEL}
-ENV KATAGO_HUMAN_MODEL_PATH="./${KATAGO_HUMAN_MODEL}"
-
-WORKDIR /app
-
-# Install runtime dependencies
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-runtime-ubuntu22.04 AS gpu-base
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libzip4 \
-    ca-certificates \
-    wget \
-    libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy binaries
-COPY --from=rust-builder /app/target/release/katago-server /app/
+    ca-certificates curl libgomp1 libzip4 zlib1g \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1000 katago \
+    && useradd --uid 1000 --gid 1000 --create-home --shell /usr/sbin/nologin katago
+WORKDIR /app
+COPY --from=rust-builder /app/katago-server-static /app/katago-server
 COPY --from=katago-gpu-builder /build/KataGo/cpp/katago /app/katago
-
-# Copy configurations
-COPY config.toml.example /app/config.toml.example
-COPY analysis_config.cfg.combo-gpu /app/analysis_config.cfg
-COPY docker-setup.sh /app/
-
-# Download both models and configure
-RUN chmod +x docker-setup.sh && ./docker-setup.sh
-
-# Create log directory with correct ownership for non-root user
-RUN mkdir -p /app/analysis_logs && chown 1000:1000 /app/analysis_logs
-
+COPY config.toml.example analysis_config.cfg.example docker-setup.sh /app/
+ENV RUST_LOG=info \
+    KATAGO_SERVER_HOST=:: \
+    KATAGO_SERVER_PORT=2718 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
 EXPOSE 2718
-ENV RUST_LOG=debug
-# Bind to IPv6 wildcard to support both IPv4 and IPv6 (required for Salad Cloud)
-ENV KATAGO_SERVER_HOST="::"
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
+    CMD ["/app/katago-server", "healthcheck"]
+ENTRYPOINT ["/app/katago-server"]
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:2718/api/v1/health || exit 1
+FROM gpu-base AS gpu
+ARG STANDARD_MODEL
+ARG STANDARD_MODEL_SHA256
+ENV KATAGO_MODEL=${STANDARD_MODEL} \
+    KATAGO_MODEL_SHA256=${STANDARD_MODEL_SHA256}
+COPY analysis_config.cfg.gpu /app/analysis_config.cfg
+RUN ./docker-setup.sh && chown -R katago:katago /app
+USER 1000:1000
 
-CMD ["./katago-server"]
+FROM gpu-base AS human-gpu
+ARG HUMAN_MODEL
+ARG HUMAN_MODEL_SHA256
+ENV KATAGO_MODEL=${HUMAN_MODEL} \
+    KATAGO_MODEL_SHA256=${HUMAN_MODEL_SHA256}
+COPY analysis_config.cfg.human-gpu /app/analysis_config.cfg
+RUN ./docker-setup.sh && chown -R katago:katago /app
+USER 1000:1000
 
-# ------------------------------------------------------------------------------
-# Stage: minimal
-# Minimal variant - expects KataGo and model to be mounted as volumes
-# ------------------------------------------------------------------------------
-FROM base AS minimal
-
-# Create default configs pointing to mounted paths
-RUN cp config.toml.example config.toml && \
-    sed -i 's|katago_path = "./katago"|katago_path = "/models/katago"|' config.toml && \
-    sed -i 's|model_path = ".*"|model_path = "/models/model.bin.gz"|' config.toml && \
-    sed -i 's|config_path = ".*"|config_path = "/models/analysis_config.cfg"|' config.toml
+FROM gpu-base AS combo-gpu
+ARG STANDARD_MODEL
+ARG STANDARD_MODEL_SHA256
+ARG HUMAN_MODEL
+ARG HUMAN_MODEL_SHA256
+ENV KATAGO_MODEL=${STANDARD_MODEL} \
+    KATAGO_MODEL_SHA256=${STANDARD_MODEL_SHA256} \
+    KATAGO_HUMAN_MODEL=${HUMAN_MODEL} \
+    KATAGO_HUMAN_MODEL_SHA256=${HUMAN_MODEL_SHA256}
+COPY analysis_config.cfg.combo-gpu /app/analysis_config.cfg
+RUN ./docker-setup.sh && chown -R katago:katago /app
+USER 1000:1000

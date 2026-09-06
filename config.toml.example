@@ -1,9 +1,21 @@
+# katago-server configuration. Every key is optional; these are the defaults.
+# Environment variables override this file, see docs/configuration.md.
+
 [server]
-host = "0.0.0.0"
-port = 2718
+host = "::"                       # KATAGO_SERVER_HOST; "::" serves IPv4 and IPv6
+port = 2718                       # KATAGO_SERVER_PORT
+request_timeout_secs = 300        # KATAGO_SERVER_REQUEST_TIMEOUT_SECS; whole HTTP request
+max_concurrent_requests = 256     # KATAGO_SERVER_MAX_CONCURRENT_REQUESTS; excess gets 503
+max_body_bytes = 1048576          # KATAGO_SERVER_MAX_BODY_BYTES
+cors_allowed_origins = ["*"]      # KATAGO_SERVER_CORS_ALLOWED_ORIGINS (comma separated)
+log_format = "text"               # KATAGO_SERVER_LOG_FORMAT: "text" or "json"
 
 [katago]
-katago_path = "./katago"
-model_path = "./kata1-b18c384nbt-s9131461376-d4087399203.bin.gz"
-config_path = "./analysis_config.cfg"
-move_timeout_secs = 20
+katago_path = "./katago"                  # KATAGO_KATAGO_PATH
+model_path = "./model.bin.gz"             # KATAGO_MODEL_PATH
+# human_model_path = "./human.bin.gz"     # KATAGO_HUMAN_MODEL_PATH; enables humanSLProfile
+config_path = "./analysis_config.cfg"     # KATAGO_CONFIG_PATH
+move_timeout_secs = 20                    # KATAGO_MOVE_TIMEOUT_SECS; per analysed position
+default_max_visits = 10                   # KATAGO_DEFAULT_MAX_VISITS; when a request omits maxVisits
+# max_visits_limit = 10000                # KATAGO_MAX_VISITS_LIMIT; reject larger requests with 400
+max_restart_attempts = 10                 # KATAGO_MAX_RESTART_ATTEMPTS

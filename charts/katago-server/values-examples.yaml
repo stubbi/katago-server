@@ -1,70 +1,40 @@
-# Example values for different deployment scenarios
+# Example values for common deployment scenarios. Copy one block into your own
+# values file. Every block is standalone.
 
 # ==============================================================================
-# Example 1: Basic CPU deployment with custom model download
+# Example 1: CPU with resource limits (the default image bundles KataGo + network)
 # ==============================================================================
-# replicaCount: 1
-#
-# image:
-#   tag: "latest"
-#   variant: ""
-#
 # resources:
 #   limits:
 #     cpu: 4000m
-#     memory: 2Gi
+#     memory: 3Gi
 #   requests:
 #     cpu: 2000m
 #     memory: 1Gi
 #
 # config:
 #   logLevel: info
+#   logFormat: json
+#   katago:
+#     moveTimeoutSecs: 60
+#     defaultMaxVisits: 50
+#     maxVisitsLimit: 2000
+
+# ==============================================================================
+# Example 2: Download a different network with an init container
+# ==============================================================================
+# config:
 #   customModel:
 #     enabled: true
-#     url: "https://katagotraining.org/api/networks/kata1-b40c256-s11840935168-d2898845681/network_file"
-#     filename: "kata1-b40c256.bin.gz"
-#     # Optional: Add checksum for validation
-#     # sha256sum: "abc123..."
-#   customConfig: |
-#     [server]
-#     host = "0.0.0.0"
-#     port = 2718
-#
-#     [katago]
-#     katago_path = "./katago"
-#     model_path = "/app/models/kata1-b40c256.bin.gz"
-#     config_path = "./gtp_config.cfg"
-#     move_timeout_secs = 30
+#     url: "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b18c384nbt-s9996604416-d4316597426.bin.gz"
+#     filename: "kata1-b18c384nbt.bin.gz"
+#     # sha256sum: "<sha256 of the file>"
 
 # ==============================================================================
-# Example 2: Basic CPU deployment with resource limits
+# Example 3: GPU (CUDA image, NVIDIA device plugin installed)
 # ==============================================================================
-# replicaCount: 1
-#
 # image:
-#   tag: "latest"
-#   variant: ""
-#
-# resources:
-#   limits:
-#     cpu: 4000m
-#     memory: 2Gi
-#   requests:
-#     cpu: 2000m
-#     memory: 1Gi
-#
-# config:
-#   logLevel: info
-
-# ==============================================================================
-# Example 3: GPU deployment (requires locally built GPU image)
-# ==============================================================================
-# replicaCount: 1
-#
-# image:
-#   tag: "gpu"
-#   variant: ""
-#   pullPolicy: IfNotPresent
+#   variant: "-gpu"
 #
 # gpu:
 #   enabled: true
@@ -75,30 +45,34 @@
 #   limits:
 #     memory: 4Gi
 #   requests:
-#     cpu: 2000m
+#     cpu: 1000m
 #     memory: 2Gi
-#
-# nodeSelector:
-#   nvidia.com/gpu: "true"
 #
 # tolerations:
 #   - key: nvidia.com/gpu
 #     operator: Exists
 #     effect: NoSchedule
+#
+# config:
+#   katago:
+#     analysisConfig: |
+#       logDir = analysis_logs
+#       reportAnalysisWinratesAs = SIDETOMOVE
+#       numAnalysisThreads = 4
+#       numSearchThreadsPerAnalysisThread = 8
+#       nnMaxBatchSize = 32
+#       numNNServerThreadsPerModel = 1
+#       nnCacheSizePowerOfTwo = 22
 
 # ==============================================================================
-# Example 4: Production deployment with autoscaling and ingress
+# Example 4: Production with autoscaling, ingress, metrics
 # ==============================================================================
 # replicaCount: 3
-#
-# image:
-#   tag: "v0.1.0"
-#   variant: ""
 #
 # resources:
 #   limits:
 #     cpu: 4000m
-#     memory: 2Gi
+#     memory: 3Gi
 #   requests:
 #     cpu: 2000m
 #     memory: 1Gi
@@ -118,8 +92,6 @@
 #   className: nginx
 #   annotations:
 #     cert-manager.io/cluster-issuer: letsencrypt-prod
-#     nginx.ingress.kubernetes.io/rate-limit: "100"
-#     nginx.ingress.kubernetes.io/ssl-redirect: "true"
 #   hosts:
 #     - host: katago.example.com
 #       paths:
@@ -132,16 +104,19 @@
 #
 # config:
 #   logLevel: warn
+#   logFormat: json
+#   corsAllowedOrigins:
+#     - https://goban.app
+#   maxConcurrentRequests: 64
 #
 # serviceMonitor:
 #   enabled: true
 #   interval: 30s
 
 # ==============================================================================
-# Example 5: Minimal variant with custom model (PVC)
+# Example 5: Minimal variant with KataGo and network from a PVC
 # ==============================================================================
 # image:
-#   tag: "latest"
 #   variant: "-minimal"
 #
 # volumes:
@@ -155,53 +130,40 @@
 #     readOnly: true
 #
 # config:
-#   customConfig: |
-#     [server]
-#     host = "0.0.0.0"
-#     port = 2718
-#
-#     [katago]
-#     katago_path = "/models/katago"
-#     model_path = "/models/kata1-b40c256-s11840935168-d2898845681.bin.gz"
-#     config_path = "/models/gtp_config.cfg"
-#     move_timeout_secs = 30
+#   katago:
+#     path: /models/katago
+#     modelPath: /models/kata1-b28c512nbt-s12043015936-d5616446734.bin.gz
+#     configPath: /models/analysis_config.cfg
+#     # The chart's analysisConfig is mounted at /app/analysis_config.cfg; point
+#     # configPath there instead if you prefer to manage the .cfg in values.
+#     analysisConfig: ""
 
 # ==============================================================================
-# Example 6: High availability deployment with topology spread
+# Example 6: Full config.toml instead of environment variables
+# ==============================================================================
+# config:
+#   customConfig: |
+#     [server]
+#     host = "::"
+#     port = 2718
+#     cors_allowed_origins = ["https://goban.app"]
+#
+#     [katago]
+#     katago_path = "/app/katago"
+#     model_path = "/app/kata1-b28c512nbt-s12043015936-d5616446734.bin.gz"
+#     config_path = "/app/analysis_config.cfg"
+#     move_timeout_secs = 60
+#     default_max_visits = 50
+
+# ==============================================================================
+# Example 7: Spread replicas across zones and nodes
 # ==============================================================================
 # replicaCount: 5
-#
-# image:
-#   tag: "v0.1.0"
-#
-# resources:
-#   limits:
-#     cpu: 4000m
-#     memory: 2Gi
-#   requests:
-#     cpu: 2000m
-#     memory: 1Gi
-#
-# autoscaling:
-#   enabled: true
-#   minReplicas: 5
-#   maxReplicas: 20
-#   targetCPUUtilizationPercentage: 60
-#
-# podDisruptionBudget:
-#   enabled: true
-#   minAvailable: 3
 #
 # topologySpreadConstraints:
 #   - maxSkew: 1
 #     topologyKey: topology.kubernetes.io/zone
 #     whenUnsatisfiable: DoNotSchedule
-#     labelSelector:
-#       matchLabels:
-#         app.kubernetes.io/name: katago-server
-#   - maxSkew: 2
-#     topologyKey: kubernetes.io/hostname
-#     whenUnsatisfiable: ScheduleAnyway
 #     labelSelector:
 #       matchLabels:
 #         app.kubernetes.io/name: katago-server

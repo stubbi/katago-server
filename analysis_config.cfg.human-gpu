@@ -2,8 +2,8 @@
 # For use with "katago analysis" command with human-style model
 # Based on recommendations from https://katagotraining.org/extra_networks/
 
-# Logging
-logDir = analysis_logs
+# Logging: to stderr only (captured by katago-server), no log files on disk
+logToStderr = true
 logSearchInfo = false
 logAllRequests = false
 logAllResponses = false

@@ -1,47 +1,12 @@
 name: CI
 
-# Continuous Integration workflow
-#
-# This workflow runs on:
-# - Pushes to main/master branches
-# - Pull requests to main/master branches
-# - Manual triggers via workflow_dispatch
-#
-# What it does:
-# - Runs Rust code quality checks (check, test, fmt, clippy)
-# - Builds all Docker image variants (base, cpu, minimal) for verification
-# - Runs smoke tests on the CPU variant
-#
-# Important: This workflow does NOT push Docker images to GHCR
-# Docker images are only pushed via the Release workflow when a version tag is pushed
-#
-# This ensures GHCR only contains released versions, not every CI build
+# Runs on every push to main and every pull request.
+# Docker images are only built here; publishing happens in release.yml.
 
 on:
   push:
-    branches: [ main, master ]
-    paths:
-      - 'src/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'Dockerfile'
-      - 'docker-setup.sh'
-      - 'gtp_config.cfg.*'
-      - 'analysis_config.cfg.*'
-      - 'config.toml.example'
-      - '.github/workflows/ci.yml'
+    branches: [main]
   pull_request:
-    branches: [ main, master ]
-    paths:
-      - 'src/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'Dockerfile'
-      - 'docker-setup.sh'
-      - 'gtp_config.cfg.*'
-      - 'analysis_config.cfg.*'
-      - 'config.toml.example'
-      - '.github/workflows/ci.yml'
   workflow_dispatch:
 
 concurrency:
@@ -58,254 +23,185 @@ env:
   RUSTUP_MAX_RETRIES: 10
 
 jobs:
-  # ===========================================================================
-  # Rust code quality checks
-  # ===========================================================================
-  check:
-    name: Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "rust-cache"
-      - run: cargo check --all-features
-
+  # ---------------------------------------------------------------------------
+  # Rust
+  # ---------------------------------------------------------------------------
   test:
-    name: Test Suite
+    name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "rust-cache"
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-      - run: cargo nextest run --all-features
+      - run: cargo test --all-targets --locked
+      - run: cargo test --doc --locked
 
-  fmt:
-    name: Rustfmt
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
-      - run: cargo fmt --all -- --check
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "rust-cache"
-      - run: cargo clippy --all-features -- -D warnings
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo doc --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
 
-  # ===========================================================================
-  # Docker builds - verify all variants can be built
-  # NOTE: Skip on main branch pushes since these tests already run on PRs
-  # ===========================================================================
-  docker-verify:
-    name: Verify Docker Build (${{ matrix.variant }})
-    needs: [check, test]  # Start Docker builds early, fmt/clippy can run in parallel
+  msrv:
+    name: MSRV (rust-version)
     runs-on: ubuntu-latest
-    if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - id: msrv
+        run: echo "version=$(grep '^rust-version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets --locked
 
+  deny:
+    name: Dependencies (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+  # ---------------------------------------------------------------------------
+  # Everything that is not Rust
+  # ---------------------------------------------------------------------------
+  scripts:
+    name: Shell, Docker and Helm lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck -S warning setup.sh test.sh docker-setup.sh
+      - name: hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+      - uses: azure/setup-helm@v4
+      - name: helm lint and template
+        run: |
+          set -euo pipefail
+          helm lint charts/katago-server
+          helm template test charts/katago-server > /dev/null
+          helm template test charts/katago-server --set-string config.customConfig='[server]' > /dev/null
+          helm template test charts/katago-server \
+            --set config.customModel.enabled=true \
+            --set config.customModel.url=https://example.invalid/model.bin.gz > /dev/null
+          helm template test charts/katago-server --set gpu.enabled=true --set serviceMonitor.enabled=true > /dev/null
+
+  versions:
+    name: Version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cargo.toml, Cargo.lock, Chart.yaml and CHANGELOG agree
+        run: |
+          set -euo pipefail
+          CARGO=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          LOCK=$(awk '/^name = "katago-server"/{getline; print}' Cargo.lock | cut -d'"' -f2)
+          CHART=$(grep -m1 '^version:' charts/katago-server/Chart.yaml | awk '{print $2}')
+          APP=$(grep -m1 '^appVersion:' charts/katago-server/Chart.yaml | awk '{print $2}' | tr -d '"')
+          echo "Cargo.toml=$CARGO Cargo.lock=$LOCK Chart.version=$CHART Chart.appVersion=$APP"
+          [ "$CARGO" = "$LOCK" ] || { echo "::error::Cargo.lock is stale, run cargo update -p katago-server"; exit 1; }
+          [ "$CARGO" = "$CHART" ] || { echo "::error::Cargo.toml version and Chart.yaml version differ"; exit 1; }
+          [ "$CARGO" = "$APP" ] || { echo "::error::Cargo.toml version and Chart.yaml appVersion differ"; exit 1; }
+          grep -q "^## \[$CARGO\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no section for $CARGO"; exit 1; }
+
+  # ---------------------------------------------------------------------------
+  # Docker: build (no push) and smoke test the CPU image with a real KataGo
+  # ---------------------------------------------------------------------------
+  docker-build:
+    name: Docker build (${{ matrix.target }})
+    needs: [test, lint]
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - variant: base
+          - target: base
             platforms: linux/amd64,linux/arm64
-          - variant: cpu
+          - target: minimal
             platforms: linux/amd64,linux/arm64
-          - variant: minimal
+          - target: cpu
             platforms: linux/amd64,linux/arm64
-          - variant: human-cpu
-            platforms: linux/amd64,linux/arm64
-          - variant: combo-cpu
-            platforms: linux/amd64,linux/arm64
-
+          - target: human-cpu
+            platforms: linux/amd64
+          - target: combo-cpu
+            platforms: linux/amd64
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set image name to lowercase
-        id: image
-        run: echo "name=$(echo 'ghcr.io/${{ github.repository_owner }}/katago-server' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Extract metadata (tags, labels)
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ steps.image.outputs.name }}
-          flavor: |
-            suffix=${{ matrix.variant == 'base' && '' || format('-{0}', matrix.variant) }},onlatest=true
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ matrix.variant }},enable=${{ matrix.variant == 'base' }}
-          labels: |
-            org.opencontainers.image.title=KataGo Server (${{ matrix.variant }})
-            org.opencontainers.image.description=KataGo Server - ${{ matrix.variant }} variant
-
-      - name: Build Docker image (verification only)
-        id: build
-        uses: docker/build-push-action@v5
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        uses: docker/build-push-action@v6
         with:
           context: .
-          target: ${{ matrix.variant }}
-          push: false
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          target: ${{ matrix.target }}
           platforms: ${{ matrix.platforms }}
+          push: false
+          build-args: GIT_SHA=${{ github.sha }}
           cache-from: |
-            type=gha,scope=${{ matrix.variant }}-${{ github.ref_name }}
-            type=gha,scope=${{ matrix.variant }}-main
-          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-${{ github.ref_name }}
-          provenance: false
-          build-args: |
-            GIT_SHA=${{ github.sha }}
-
-      # Build CPU image for amd64 only and export for smoke testing
-      - name: Build CPU image for testing
-        if: matrix.variant == 'cpu'
-        uses: docker/build-push-action@v5
+            type=gha,scope=${{ matrix.target }}-${{ github.ref_name }}
+            type=gha,scope=${{ matrix.target }}-main
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}-${{ github.ref_name }}
+      - name: Export amd64 image for smoke test
+        if: matrix.target == 'cpu'
+        uses: docker/build-push-action@v6
         with:
           context: .
           target: cpu
-          load: true
-          tags: katago-server:test-cpu
           platforms: linux/amd64
+          tags: katago-server:ci-cpu
+          build-args: GIT_SHA=${{ github.sha }}
           cache-from: |
             type=gha,scope=cpu-${{ github.ref_name }}
             type=gha,scope=cpu-main
-          outputs: type=docker,dest=/tmp/cpu-image.tar
-
-      - name: Upload CPU image for testing
-        if: matrix.variant == 'cpu'
+          outputs: type=docker,dest=/tmp/katago-server-cpu.tar
+      - if: matrix.target == 'cpu'
         uses: actions/upload-artifact@v4
         with:
-          name: cpu-docker-image
-          path: /tmp/cpu-image.tar
+          name: katago-server-cpu-image
+          path: /tmp/katago-server-cpu.tar
           retention-days: 1
 
-  # ===========================================================================
-  # Smoke test - verify CPU variant works
-  # NOTE: Skip on main branch pushes since these tests already run on PRs
-  # ===========================================================================
-  docker-test:
-    name: Smoke Test (CPU)
-    needs: docker-verify
+  docker-smoke:
+    name: Docker smoke test (cpu)
+    needs: docker-build
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
-    if: github.event_name != 'push' || github.ref != 'refs/heads/main'
-
     steps:
-      - name: Download CPU image
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: cpu-docker-image
+          name: katago-server-cpu-image
           path: /tmp
-
-      - name: Load Docker image
-        run: docker load --input /tmp/cpu-image.tar
-
-      - name: Create test network
-        run: docker network create test-net
-
+      - run: docker load --input /tmp/katago-server-cpu.tar
       - name: Start container
+        run: docker run -d --name katago -p 2718:2718 katago-server:ci-cpu
+      - name: Smoke test
+        env:
+          READY_TIMEOUT: 240
+        run: ./test.sh localhost:2718
+      - name: Container health and clean shutdown
         run: |
-          docker run -d \
-            --name test-container \
-            --network test-net \
-            katago-server:test-cpu
-
-      - name: Wait for startup
-        run: sleep 15
-
-      - name: Check container logs
-        run: |
-          echo "=== Container Logs ==="
-          docker logs test-container 2>&1 | tee container.log
-          echo "======================"
-
-          # Check for successful startup
-          if ! grep -q "Listening on" container.log; then
-            echo "ERROR: Server did not start successfully"
-            exit 1
-          fi
-
-          # Ensure no stderr errors about missing files
-          if grep -qi "no such file" container.log; then
-            echo "ERROR: Missing files detected in logs"
-            exit 1
-          fi
-
-      - name: Test health endpoint
-        run: |
-          docker run --rm --network test-net curlimages/curl:latest \
-            curl -f http://test-container:2718/api/v1/health || {
-            echo "ERROR: Health check failed"
-            exit 1
-          }
-          echo "Health check passed ✓"
-
-      - name: Test API endpoint
-        run: |
-          RESPONSE=$(docker run --rm --network test-net curlimages/curl:latest \
-            curl -f -X POST http://test-container:2718/api/v1/analysis \
-            -H "Content-Type: application/json" \
-            -d '{"moves":["R4","D16"],"boardXSize":19,"boardYSize":19,"includeOwnership":true}') || {
-            echo "ERROR: API endpoint request failed"
-            docker logs test-container
-            exit 1
-          }
-
-          echo "Response: $RESPONSE"
-
-          # Validate ownership data (should have 361 values for 19x19 board)
-          OWNERSHIP_COUNT=$(echo "$RESPONSE" | docker run --rm -i ghcr.io/jqlang/jq:latest '.ownership | length')
-          echo "Ownership values count: $OWNERSHIP_COUNT (expected: 361)"
-          if [ "$OWNERSHIP_COUNT" != "361" ]; then
-            echo "ERROR: Expected 361 ownership values, got $OWNERSHIP_COUNT"
-            docker logs test-container
-            exit 1
-          fi
-
-          # Validate winrate is present and reasonable
-          WINRATE=$(echo "$RESPONSE" | docker run --rm -i ghcr.io/jqlang/jq:latest '.rootInfo.winrate')
-          echo "Winrate: $WINRATE"
-          if [ "$WINRATE" = "null" ] || [ -z "$WINRATE" ]; then
-            echo "ERROR: Winrate is null or missing"
-            docker logs test-container
-            exit 1
-          fi
-
-          echo "API test passed ✓"
-          echo "  - Ownership values: $OWNERSHIP_COUNT ✓"
-          echo "  - Winrate: $WINRATE ✓"
-
-      - name: Cleanup
-        if: always()
-        run: |
-          docker rm -f test-container || true
-          docker network rm test-net || true
+          set -euo pipefail
+          docker inspect --format 'health={{.State.Health.Status}}' katago
+          docker stop -t 30 katago
+          EXIT=$(docker inspect --format '{{.State.ExitCode}}' katago)
+          echo "exit code $EXIT"
+          [ "$EXIT" = "0" ] || { echo "::error::container did not exit cleanly on SIGTERM"; exit 1; }
+      - if: always()
+        run: docker logs katago 2>&1 | tail -60

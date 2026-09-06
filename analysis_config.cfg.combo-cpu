@@ -3,8 +3,8 @@
 # The standard model is used for analysis by default
 # Human model can be activated per-request via overrideSettings with humanSLProfile
 
-# Logging
-logDir = analysis_logs
+# Logging: to stderr only (captured by katago-server), no log files on disk
+logToStderr = true
 logSearchInfo = false
 logAllRequests = false
 logAllResponses = false

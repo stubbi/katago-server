@@ -2,8 +2,8 @@
 # For use with "katago analysis" command
 # Optimized for RTX 3080 (10GB VRAM) on Salad Cloud
 
-# Logging
-logDir = analysis_logs
+# Logging: to stderr only (captured by katago-server), no log files on disk
+logToStderr = true
 logSearchInfo = false
 logAllRequests = false
 logAllResponses = false

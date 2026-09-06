@@ -1,25 +1,42 @@
 [Unit]
-Description=KataGo Server (Rust)
-After=network.target
+Description=KataGo Server (REST API for the KataGo Go engine)
+Documentation=https://github.com/goban-app/katago-server
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=your-user-name
-Group=your-group-name
-WorkingDirectory=/var/www/katago-server
-ExecStart=/var/www/katago-server/target/release/katago-server
+# Create this user and give it read access to the KataGo binary, network and configs.
+User=katago
+Group=katago
+WorkingDirectory=/opt/katago-server
+ExecStart=/usr/local/bin/katago-server
+Environment=KATAGO_CONFIG_FILE=/opt/katago-server/config.toml
+Environment=RUST_LOG=info
+
 Restart=on-failure
 RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=30
 
-# Environment
-Environment="RUST_LOG=info"
-
-# Security
+# Hardening
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/www/katago-server
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+# KataGo writes its logs under the working directory (logDir in analysis_config.cfg).
+ReadWritePaths=/opt/katago-server
 
 [Install]
 WantedBy=multi-user.target

@@ -1,0 +1,4 @@
+# Pinning apt package versions across Debian and Ubuntu CUDA bases is not
+# practical; images are rebuilt on every release and scanned by dependabot.
+ignored:
+  - DL3008
