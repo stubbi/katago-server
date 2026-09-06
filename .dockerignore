@@ -1,37 +1,8 @@
-# Git
-.git
-.gitignore
-.github
-
-# Rust build artifacts
-target/
-**/*.rs.bk
-*.pdb
-
-# Keep Cargo.lock for Docker builds
-# Cargo.lock
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# Documentation
-README.md
-LICENSE
-docs/
-
-# Docker
-docker-compose.yml
-Dockerfile*
-.dockerignore
-
-# CI/CD
-.github/
-
-# Misc
-*.log
-*.tmp
-.DS_Store
+# Only what the image build needs is sent to the daemon.
+*
+!Cargo.toml
+!Cargo.lock
+!src/
+!config.toml.example
+!analysis_config.cfg.*
+!docker-setup.sh

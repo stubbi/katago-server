@@ -1,38 +1,17 @@
 name: Release
 
-# Chart version-based release workflow
-#
-# This workflow is triggered when Chart.yaml is modified on the main branch.
-# It automatically detects version changes and creates releases.
-#
-# Workflow:
-# 1. Detects if Chart.yaml version has changed (compares to previous commit)
-# 2. If version changed:
-#    - Validates semantic versioning format
-#    - Builds and pushes Docker images with the chart version
-#    - Releases Helm chart with that version
-#    - Automatically creates a git tag (e.g., v0.4.0)
-#    - Creates a GitHub release with documentation
-# 3. If version hasn't changed, workflow exits early (no release)
-#
-# Best practices:
-# - Chart.yaml is the single source of truth for versions
-# - Update Chart.yaml version in a PR, merge to main to trigger release
-# - Version must follow semantic versioning (X.Y.Z)
-# - Docker images and Helm chart versions are always synchronized
-# - Only releases push Docker images to GHCR (CI builds do not)
-#
-# To create a release:
-#   1. Update charts/katago-server/Chart.yaml (both version and appVersion)
-#   2. Commit and push to main (or merge a PR)
-#   3. Workflow automatically detects the change and releases
+# Releases are driven by charts/katago-server/Chart.yaml on main:
+#   1. bump Cargo.toml, Cargo.lock, CHANGELOG.md and Chart.yaml (version + appVersion)
+#      to the same X.Y.Z in a PR (CI's "Version consistency" job enforces it)
+#   2. merge -> this workflow builds and pushes every image variant, publishes the
+#      Helm chart to GitHub Pages, creates tag vX.Y.Z and a GitHub release.
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
-      - 'charts/katago-server/Chart.yaml'
+      - charts/katago-server/Chart.yaml
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -41,310 +20,185 @@ permissions:
   id-token: write
 
 env:
-  CARGO_TERM_COLOR: always
+  IMAGE: ghcr.io/${{ github.repository_owner }}/katago-server
 
 jobs:
-  # ===========================================================================
-  # Detect version change
-  # ===========================================================================
-  detect-version-change:
-    name: Detect Version Change
+  version:
+    name: Detect version change
     runs-on: ubuntu-latest
     outputs:
-      version_changed: ${{ steps.check.outputs.changed }}
-      new_version: ${{ steps.check.outputs.version }}
-      previous_version: ${{ steps.check.outputs.previous_version }}
+      changed: ${{ steps.check.outputs.changed }}
+      version: ${{ steps.check.outputs.version }}
+      previous: ${{ steps.check.outputs.previous }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 2  # Need at least 2 commits to compare
-
-      - name: Check if version changed
-        id: check
+          fetch-depth: 2
+      - id: check
         run: |
-          # Get current version
-          CURRENT_VERSION=$(grep '^version:' charts/katago-server/Chart.yaml | awk '{print $2}')
-          echo "Current version: $CURRENT_VERSION"
-
-          # Get previous version (from parent commit)
-          PREVIOUS_VERSION=$(git show HEAD^:charts/katago-server/Chart.yaml | grep '^version:' | awk '{print $2}')
-          echo "Previous version: $PREVIOUS_VERSION"
-
-          # Check if version changed
-          if [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ]; then
-            echo "✓ Version changed from $PREVIOUS_VERSION to $CURRENT_VERSION"
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
-            echo "previous_version=$PREVIOUS_VERSION" >> $GITHUB_OUTPUT
-
-            # Validate semantic versioning format
-            if ! echo "$CURRENT_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?$'; then
-              echo "Error: Version '$CURRENT_VERSION' is not valid semantic versioning format"
-              echo "Expected format: X.Y.Z or X.Y.Z-prerelease or X.Y.Z+build"
-              exit 1
-            fi
-          else
-            echo "Version unchanged ($CURRENT_VERSION), skipping release"
-            echo "changed=false" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          CURRENT=$(grep -m1 '^version:' charts/katago-server/Chart.yaml | awk '{print $2}')
+          PREVIOUS=$(git show HEAD^:charts/katago-server/Chart.yaml 2>/dev/null | grep -m1 '^version:' | awk '{print $2}' || true)
+          CARGO=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          echo "chart=$CURRENT previous=$PREVIOUS cargo=$CARGO"
+          echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "previous=$PREVIOUS" >> "$GITHUB_OUTPUT"
+          if [ "$CURRENT" = "$PREVIOUS" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          echo "$CURRENT" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' \
+            || { echo "::error::$CURRENT is not a semantic version"; exit 1; }
+          [ "$CURRENT" = "$CARGO" ] || { echo "::error::Chart.yaml ($CURRENT) and Cargo.toml ($CARGO) disagree"; exit 1; }
+          if git rev-parse "v$CURRENT" >/dev/null 2>&1; then
+            echo "::error::tag v$CURRENT already exists"; exit 1
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
 
-  # ===========================================================================
-  # Build and push versioned Docker images
-  # ===========================================================================
-  docker-release:
-    name: Release Docker Image (${{ matrix.variant }})
-    needs: detect-version-change
-    if: needs.detect-version-change.outputs.version_changed == 'true'
+  images:
+    name: Image (${{ matrix.target }})
+    needs: version
+    if: needs.version.outputs.changed == 'true'
     runs-on: ubuntu-latest
-
     strategy:
       fail-fast: false
       matrix:
         include:
-          - variant: base
+          - target: base
             platforms: linux/amd64,linux/arm64
-          - variant: cpu
+          - target: minimal
             platforms: linux/amd64,linux/arm64
-          - variant: gpu
+          - target: cpu
+            platforms: linux/amd64,linux/arm64
+          - target: human-cpu
+            platforms: linux/amd64,linux/arm64
+          - target: combo-cpu
+            platforms: linux/amd64,linux/arm64
+          - target: gpu
             platforms: linux/amd64
-          - variant: minimal
-            platforms: linux/amd64,linux/arm64
-          - variant: human-cpu
-            platforms: linux/amd64,linux/arm64
-          - variant: human-gpu
+          - target: human-gpu
             platforms: linux/amd64
-          - variant: combo-cpu
-            platforms: linux/amd64,linux/arm64
-          - variant: combo-gpu
+          - target: combo-gpu
             platforms: linux/amd64
-
     steps:
-      - name: Free disk space (for GPU build)
-        if: matrix.variant == 'gpu' || matrix.variant == 'human-gpu' || matrix.variant == 'combo-gpu'
+      - name: Free disk space (CUDA builds)
+        if: contains(matrix.target, 'gpu')
         run: |
-          echo "Before cleanup:"
-          df -h
-          # Remove unnecessary tools and libraries (aggressive cleanup for CUDA builds)
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /opt/hostedtoolcache/go
-          sudo rm -rf /opt/hostedtoolcache/node
-          sudo rm -rf /opt/hostedtoolcache/Python
-          sudo rm -rf /opt/hostedtoolcache/Ruby
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/local/share/powershell
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /usr/local/julia*
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/share/swift /usr/local/.ghcup /usr/local/share/powershell \
+            /usr/local/share/chromium /usr/local/julia*
           sudo docker image prune -af
-          sudo apt-get clean
-          echo "After cleanup:"
-          df -h
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set image name to lowercase
-        id: image
-        run: echo "name=$(echo 'ghcr.io/${{ github.repository_owner }}/katago-server' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+          df -h /
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata (tags, labels)
-        id: meta
+      - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ steps.image.outputs.name }}
+          images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=${{ needs.detect-version-change.outputs.new_version }}-${{ matrix.variant }},enable=${{ matrix.variant != 'cpu' }}
-            type=raw,value=latest-${{ matrix.variant }},enable=${{ matrix.variant != 'cpu' }}
-            type=raw,value=${{ needs.detect-version-change.outputs.new_version }}-cpu,enable=${{ matrix.variant == 'cpu' }}
-            type=raw,value=${{ needs.detect-version-change.outputs.new_version }},enable=${{ matrix.variant == 'cpu' }}
-            type=raw,value=latest-cpu,enable=${{ matrix.variant == 'cpu' }}
-            type=raw,value=latest,enable=${{ matrix.variant == 'cpu' }}
+            type=raw,value=${{ needs.version.outputs.version }}-${{ matrix.target }}
+            type=raw,value=latest-${{ matrix.target }}
+            type=raw,value=${{ needs.version.outputs.version }},enable=${{ matrix.target == 'cpu' }}
+            type=raw,value=latest,enable=${{ matrix.target == 'cpu' }}
           labels: |
-            org.opencontainers.image.title=KataGo Server (${{ matrix.variant }})
-            org.opencontainers.image.description=KataGo Server - ${{ matrix.variant }} variant
-            org.opencontainers.image.version=${{ needs.detect-version-change.outputs.new_version }}
-
-      - name: Build and push Docker image
-        id: push
-        uses: docker/build-push-action@v5
+            org.opencontainers.image.title=katago-server (${{ matrix.target }})
+            org.opencontainers.image.description=REST API server for the KataGo Go engine, ${{ matrix.target }} variant
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+            org.opencontainers.image.licenses=MIT
+      - id: push
+        uses: docker/build-push-action@v6
         with:
           context: .
-          target: ${{ matrix.variant }}
+          target: ${{ matrix.target }}
+          platforms: ${{ matrix.platforms }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: ${{ matrix.platforms }}
-          cache-from: |
-            type=gha,scope=${{ matrix.variant }}-main
-          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-main
+          build-args: GIT_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.target }}-main
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}-main
           provenance: false
-          build-args: |
-            GIT_SHA=${{ github.sha }}
-
-      - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v1
+      - uses: actions/attest-build-provenance@v2
         with:
-          subject-name: ${{ steps.image.outputs.name }}
+          subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: false
+          push-to-registry: true
 
-  # ===========================================================================
-  # Release Helm Chart
-  # ===========================================================================
-  helm-release:
-    name: Release Helm Chart
-    needs: [detect-version-change, docker-release]
-    if: needs.detect-version-change.outputs.version_changed == 'true'
+  helm:
+    name: Publish Helm chart
+    needs: [version, images]
+    if: needs.version.outputs.changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Configure Git
-        run: |
-          git config user.name "$GITHUB_ACTOR"
-          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
-
-      - name: Install Helm
-        uses: azure/setup-helm@v4
-        with:
-          version: 'v3.14.0'
-
-      - name: Run chart-releaser
-        uses: helm/chart-releaser-action@v1.7.0
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - uses: azure/setup-helm@v4
+      - uses: helm/chart-releaser-action@v1.7.0
         with:
           charts_dir: charts
+          skip_existing: true
         env:
-          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ===========================================================================
-  # Create Git Tag
-  # ===========================================================================
-  create-tag:
-    name: Create Git Tag
-    needs: [detect-version-change, docker-release, helm-release]
-    if: needs.detect-version-change.outputs.version_changed == 'true'
+  release:
+    name: Tag and GitHub release
+    needs: [version, images, helm]
+    if: needs.version.outputs.changed == 'true'
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Create and push tag
-        env:
-          VERSION: ${{ needs.detect-version-change.outputs.new_version }}
+      - uses: actions/checkout@v4
+      - name: Create tag
         run: |
-          git config user.name "$GITHUB_ACTOR"
-          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "Release v$VERSION"
+          git push origin "v$VERSION"
+      - name: Extract changelog section
+        id: notes
+        run: |
+          set -euo pipefail
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { grab = 1; next }
+            grab && /^## \[/ { exit }
+            grab { print }
+          ' CHANGELOG.md > release-notes.md
+          echo "--- release notes ---"; cat release-notes.md
+      - name: Append image and chart pointers
+        run: |
+          cat >> release-notes.md <<EOF
 
-          TAG_NAME="v${VERSION}"
+          ## Images
 
-          # Check if tag already exists
-          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
-            echo "Tag $TAG_NAME already exists, skipping tag creation"
-          else
-            echo "Creating tag $TAG_NAME"
-            git tag -a "$TAG_NAME" -m "Release version $VERSION"
-            git push origin "$TAG_NAME"
-            echo "✓ Tag $TAG_NAME created and pushed"
-          fi
+          \`\`\`
+          ghcr.io/goban-app/katago-server:${VERSION}           # cpu (default), also :latest
+          ghcr.io/goban-app/katago-server:${VERSION}-gpu       # CUDA, also -human-gpu, -combo-gpu
+          ghcr.io/goban-app/katago-server:${VERSION}-human-cpu # Human SL network, also -combo-cpu
+          ghcr.io/goban-app/katago-server:${VERSION}-minimal   # bring your own KataGo (/models)
+          ghcr.io/goban-app/katago-server:${VERSION}-base      # server binary only
+          \`\`\`
 
-  # ===========================================================================
-  # Create GitHub Release
-  # ===========================================================================
-  github-release:
-    name: Create GitHub Release
-    needs: [detect-version-change, docker-release, helm-release, create-tag]
-    if: needs.detect-version-change.outputs.version_changed == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+          ## Helm
 
-      - name: Create Release
-        env:
-          VERSION: ${{ needs.detect-version-change.outputs.new_version }}
-        uses: softprops/action-gh-release@v2
+          \`\`\`
+          helm repo add katago-server https://goban-app.github.io/katago-server
+          helm install katago katago-server/katago-server --version ${VERSION}
+          \`\`\`
+          EOF
+      - uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ needs.detect-version-change.outputs.new_version }}
-          name: Release ${{ needs.detect-version-change.outputs.new_version }}
+          tag_name: v${{ env.VERSION }}
+          name: v${{ env.VERSION }}
+          body_path: release-notes.md
           generate_release_notes: true
-          body: |
-            ## Docker Images
-
-            This release includes the following Docker images:
-
-            ### Standard KataGo (strongest analysis)
-            - `ghcr.io/goban-app/katago-server:${{ needs.detect-version-change.outputs.new_version }}` or `:latest` (CPU variant - **default**)
-            - `ghcr.io/goban-app/katago-server:${{ needs.detect-version-change.outputs.new_version }}-cpu` or `:latest-cpu` (CPU variant - explicit tag)
-            - `ghcr.io/goban-app/katago-server:${{ needs.detect-version-change.outputs.new_version }}-gpu` or `:latest-gpu` (GPU/CUDA variant - for NVIDIA GPUs)
-
-            ### Combo (standard + human model)
-            - `ghcr.io/goban-app/katago-server:${{ needs.detect-version-change.outputs.new_version }}-combo-cpu` or `:latest-combo-cpu` (CPU with both models)
-            - `ghcr.io/goban-app/katago-server:${{ needs.detect-version-change.outputs.new_version }}-combo-gpu` or `:latest-combo-gpu` (GPU with both models)
-
-            The combo images include both the standard KataGo model and the Human SL model. Use `overrideSettings` with `humanSLProfile` to enable human-style analysis.
-
-            ### Human SL Network only (human-style analysis)
-            - `ghcr.io/goban-app/katago-server:${{ needs.detect-version-change.outputs.new_version }}-human-cpu` or `:latest-human-cpu` (CPU variant with human model only)
-            - `ghcr.io/goban-app/katago-server:${{ needs.detect-version-change.outputs.new_version }}-human-gpu` or `:latest-human-gpu` (GPU variant with human model only)
-
-            ### Other variants
-            - `ghcr.io/goban-app/katago-server:${{ needs.detect-version-change.outputs.new_version }}-minimal` or `:latest-minimal` (Minimal variant - BYO KataGo)
-            - `ghcr.io/goban-app/katago-server:${{ needs.detect-version-change.outputs.new_version }}-base` or `:latest-base` (Base variant - binary only)
-
-            CPU, minimal, base, human-cpu, and combo-cpu images are available for `linux/amd64` and `linux/arm64` platforms.
-            GPU, human-gpu, and combo-gpu images are available for `linux/amd64` only (requires NVIDIA CUDA).
-
-            **Note:** The default image (without suffix) points to the CPU variant.
-
-            ## Helm Chart
-
-            Install the Helm chart for this release:
-
-            ```bash
-            helm repo add katago-server https://goban-app.github.io/katago-server
-            helm repo update
-            helm install my-katago katago-server/katago-server --version ${{ needs.detect-version-change.outputs.new_version }}
-            ```
-
-            Or use the Docker images directly:
-
-            ```bash
-            # CPU variant (strongest analysis)
-            docker pull ghcr.io/goban-app/katago-server:${{ needs.detect-version-change.outputs.new_version }}
-            docker run -p 2718:2718 ghcr.io/goban-app/katago-server:${{ needs.detect-version-change.outputs.new_version }}
-
-            # GPU variant (requires NVIDIA Container Toolkit)
-            docker pull ghcr.io/goban-app/katago-server:${{ needs.detect-version-change.outputs.new_version }}-gpu
-            docker run --gpus all -p 2718:2718 ghcr.io/goban-app/katago-server:${{ needs.detect-version-change.outputs.new_version }}-gpu
-
-            # Combo GPU variant (both standard and human models)
-            docker pull ghcr.io/goban-app/katago-server:${{ needs.detect-version-change.outputs.new_version }}-combo-gpu
-            docker run --gpus all -p 2718:2718 ghcr.io/goban-app/katago-server:${{ needs.detect-version-change.outputs.new_version }}-combo-gpu
-            ```
-
-            ## What's Changed
-
-            Version updated from ${{ needs.detect-version-change.outputs.previous_version }} → ${{ needs.detect-version-change.outputs.new_version }}
-
-            See the auto-generated release notes below for detailed changes.

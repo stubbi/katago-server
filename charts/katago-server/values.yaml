@@ -1,6 +1,4 @@
 # Default values for katago-server.
-# This is a YAML-formatted file.
-# Declare variables to be passed into your templates.
 
 replicaCount: 1
 
@@ -9,7 +7,14 @@ image:
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""
-  # Image variant: "" (cpu - default), "-cpu" (explicit), "-gpu" (CUDA GPU), "-minimal" (BYO KataGo), "-base" (binary only)
+  # Image variant suffix:
+  #   ""            CPU with the standard network (default)
+  #   "-cpu"        same as "", explicit
+  #   "-gpu"        CUDA build with the standard network (set gpu.enabled)
+  #   "-human-cpu"  / "-human-gpu"  Human SL network only
+  #   "-combo-cpu"  / "-combo-gpu"  standard + Human SL network
+  #   "-minimal"    no KataGo/model bundled; mount them and set config.katago.* paths
+  #   "-base"       server binary only
   variant: ""
 
 imagePullSecrets: []
@@ -17,14 +22,9 @@ nameOverride: ""
 fullnameOverride: ""
 
 serviceAccount:
-  # Specifies whether a service account should be created
   create: true
-  # Automatically mount a ServiceAccount's API credentials?
-  automount: true
-  # Annotations to add to the service account
+  automount: false
   annotations: {}
-  # The name of the service account to use.
-  # If not set and create is true, a name is generated using the fullname template
   name: ""
 
 podAnnotations: {}
@@ -33,6 +33,7 @@ podLabels: {}
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000
+  runAsGroup: 1000
   fsGroup: 1000
   seccompProfile:
     type: RuntimeDefault
@@ -41,7 +42,10 @@ securityContext:
   allowPrivilegeEscalation: false
   capabilities:
     drop:
-    - ALL
+      - ALL
+  # KataGo writes its own log files under /app/analysis_logs, so the root
+  # filesystem cannot be read-only yet. Mount an emptyDir there and flip this
+  # to true if you need it.
   readOnlyRootFilesystem: false
   runAsNonRoot: true
   runAsUser: 1000
@@ -56,7 +60,6 @@ ingress:
   enabled: false
   className: ""
   annotations: {}
-    # kubernetes.io/ingress.class: nginx
     # kubernetes.io/tls-acme: "true"
     # cert-manager.io/cluster-issuer: letsencrypt-prod
   hosts:
@@ -70,48 +73,47 @@ ingress:
   #      - katago-server.local
 
 resources: {}
-  # We recommend setting resource requests and limits for production deployments
-  # CPU variant typically needs:
+  # CPU variant, b28 network:
   # limits:
   #   cpu: 4000m
-  #   memory: 2Gi
+  #   memory: 3Gi
   # requests:
   #   cpu: 2000m
   #   memory: 1Gi
-  # GPU variant typically needs:
+  # GPU variant (the GPU itself is requested through gpu.*):
   # limits:
-  #   nvidia.com/gpu: 1
   #   memory: 4Gi
   # requests:
-  #   cpu: 2000m
+  #   cpu: 1000m
   #   memory: 2Gi
 
+# Liveness fails only when KataGo is down and the server has given up restarting it.
 livenessProbe:
   httpGet:
-    path: /api/v1/health
+    path: /api/v1/health/live
     port: http
-  initialDelaySeconds: 30
   periodSeconds: 10
   timeoutSeconds: 5
   failureThreshold: 3
 
+# Readiness passes once KataGo has loaded its network and answered a query.
 readinessProbe:
   httpGet:
-    path: /api/v1/health
+    path: /api/v1/health/ready
     port: http
-  initialDelaySeconds: 15
   periodSeconds: 5
   timeoutSeconds: 3
   failureThreshold: 3
 
+# Startup protects liveness while the network loads. Loading a 28-block network
+# on CPU can take a few minutes: 60 x 5s = 5 minutes.
 startupProbe:
   httpGet:
-    path: /api/v1/health
+    path: /api/v1/health/ready
     port: http
-  initialDelaySeconds: 30
-  periodSeconds: 10
-  timeoutSeconds: 5
-  failureThreshold: 30
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 60
 
 autoscaling:
   enabled: false
@@ -120,87 +122,83 @@ autoscaling:
   targetCPUUtilizationPercentage: 80
   # targetMemoryUtilizationPercentage: 80
 
-# Additional volumes on the output Deployment definition.
+# Additional volumes / volumeMounts on the Deployment.
 volumes: []
-# - name: foo
-#   secret:
-#     secretName: mysecret
-#     optional: false
-
-# Additional volumeMounts on the output Deployment definition.
 volumeMounts: []
-# - name: foo
-#   mountPath: "/etc/foo"
-#   readOnly: true
 
 nodeSelector: {}
-
 tolerations: []
-
 affinity: {}
 
-# Pod Disruption Budget
 podDisruptionBudget:
   enabled: false
   # minAvailable: 1
   # maxUnavailable: 1
 
-# KataGo Server specific configuration
+# katago-server configuration. Every value maps to one environment variable;
+# unset values keep the image defaults.
 config:
-  # Logging level (trace, debug, info, warn, error)
+  # RUST_LOG filter (trace, debug, info, warn, error or a full directive).
   logLevel: info
+  # KATAGO_SERVER_LOG_FORMAT: "text" or "json". Empty keeps the server default (text).
+  logFormat: ""
+  # KATAGO_SERVER_CORS_ALLOWED_ORIGINS. Empty list keeps the server default ("*").
+  corsAllowedOrigins: []
+  # KATAGO_SERVER_MAX_CONCURRENT_REQUESTS (requests beyond this get 503).
+  maxConcurrentRequests: null
+  # KATAGO_SERVER_REQUEST_TIMEOUT_SECS (must be >= katago.moveTimeoutSecs).
+  requestTimeoutSecs: null
 
-  # KataGo configuration
-  # For minimal variant, you can mount your own KataGo binary and model
   katago:
-    # Path to KataGo binary (if using minimal variant with volume mounts)
-    path: /models/katago
-    # Path to model file (if using minimal variant with volume mounts)
-    modelPath: /models/model.bin.gz
-    # Path to KataGo Analysis Engine config file (if using minimal variant with volume mounts)
-    configPath: /models/analysis_config.cfg
-    # Move timeout in seconds
+    # Paths for the -minimal variant or custom mounts. Leave empty for bundled
+    # images, which already know where their katago, model and config live.
+    # KATAGO_KATAGO_PATH
+    path: ""
+    # KATAGO_MODEL_PATH
+    modelPath: ""
+    # KATAGO_HUMAN_MODEL_PATH
+    humanModelPath: ""
+    # KATAGO_CONFIG_PATH (the KataGo analysis .cfg, not config.toml)
+    configPath: ""
+    # KATAGO_MOVE_TIMEOUT_SECS: seconds to wait per analysed position.
     moveTimeoutSecs: 60
+    # KATAGO_DEFAULT_MAX_VISITS: applied when a request has no maxVisits.
+    defaultMaxVisits: null
+    # KATAGO_MAX_VISITS_LIMIT: requests asking for more are rejected with 400.
+    maxVisitsLimit: null
+    # KATAGO_MAX_RESTART_ATTEMPTS: restarts before liveness fails.
+    maxRestartAttempts: null
 
-    # Analysis configuration
-    # This content will be mounted as analysis_config.cfg
+    # KataGo analysis engine configuration, mounted over /app/analysis_config.cfg.
+    # Set to "" to keep the file bundled in the image.
     analysisConfig: |
       # KataGo Analysis Engine Configuration
-      # Logging
       logDir = analysis_logs
       logSearchInfo = false
       logAllRequests = false
       logAllResponses = false
 
-      # Analysis behavior
       reportAnalysisWinratesAs = SIDETOMOVE
-      # maxVisits removed to allow per-request control or time-based limits
+      # maxVisits is left unset so every request (or KATAGO_DEFAULT_MAX_VISITS) controls it.
 
-      # Threading configuration
       numAnalysisThreads = 1
       numSearchThreadsPerAnalysisThread = 1
 
-      # Neural network batching
       nnMaxBatchSize = 8
       numNNServerThreadsPerModel = 2
 
-      # Performance tuning
       nnCacheSizePowerOfTwo = 20
 
-  # Custom model download via init container
-  # If enabled, downloads a custom model before the main container starts
+  # Download a network with an init container before the server starts.
+  # The file lands in /app/models/<filename> and KATAGO_MODEL_PATH is set to it.
   customModel:
     enabled: false
-    # URL to download the model from
-    # Example: https://katagotraining.org/api/networks/kata1-b40c256-s11840935168-d2898845681/network_file
+    # e.g. https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b28c512nbt-s12043015936-d5616446734.bin.gz
     url: ""
-    # Filename to save the model as (will be placed in /app/custom-model.bin.gz)
     filename: "custom-model.bin.gz"
-    # Optional: SHA256 checksum for validation
+    # Optional SHA256 to verify the download.
     sha256sum: ""
-    # Init container image for downloading (must have wget)
     initImage: "busybox:1.36"
-    # Resource limits for init container
     initResources:
       limits:
         cpu: 100m
@@ -209,83 +207,43 @@ config:
         cpu: 50m
         memory: 64Mi
 
-  # Custom config.toml (optional)
-  # If provided, this will be mounted as a ConfigMap
+  # A complete config.toml. Mounted at /config/config.toml and selected through
+  # KATAGO_CONFIG_FILE. Environment variables above still take precedence.
   customConfig: ""
   #  customConfig: |
   #    [server]
-  #    host = "0.0.0.0"
+  #    host = "::"
   #    port = 2718
   #
   #    [katago]
-  #    katago_path = "./katago"
-  #    model_path = "./model.bin.gz"
-  #    config_path = "./analysis_config.cfg"
-  #    move_timeout_secs = 20
+  #    katago_path = "/app/katago"
+  #    model_path = "/app/models/custom-model.bin.gz"
+  #    config_path = "/app/analysis_config.cfg"
+  #    move_timeout_secs = 60
 
-# For GPU support
 gpu:
   enabled: false
-  # Number of GPUs to request
   count: 1
-  # GPU vendor (nvidia, amd)
+  # nvidia or amd
   vendor: nvidia
-  # Specific GPU product or model (optional)
-  # product: "Tesla-V100"
 
-# Environment variables
+# Extra environment variables / sources.
 env: []
-# - name: RUST_LOG
-#   value: "debug"
-# - name: KATAGO_SERVER__HOST
-#   value: "0.0.0.0"
-
-# Environment variables from ConfigMaps or Secrets
+# - name: KATAGO_SERVER_MAX_BODY_BYTES
+#   value: "2097152"
 envFrom: []
-# - configMapRef:
-#     name: katago-config
-# - secretRef:
-#     name: katago-secrets
 
-# Priority class for pod scheduling
 priorityClassName: ""
-
-# Topology spread constraints
 topologySpreadConstraints: []
-# - maxSkew: 1
-#   topologyKey: topology.kubernetes.io/zone
-#   whenUnsatisfiable: DoNotSchedule
-#   labelSelector:
-#     matchLabels:
-#       app.kubernetes.io/name: katago-server
-
-# Pod lifecycle hooks
 lifecycle: {}
-# preStop:
-#   exec:
-#     command: ["/bin/sh", "-c", "sleep 15"]
-
-# DNS configuration
 dnsPolicy: ClusterFirst
 dnsConfig: {}
-# options:
-#   - name: ndots
-#     value: "2"
-
-# Host aliases
 hostAliases: []
-# - ip: "127.0.0.1"
-#   hostnames:
-#   - "foo.local"
 
-# Service Monitor for Prometheus (if using Prometheus Operator)
+# Prometheus Operator ServiceMonitor scraping /metrics.
 serviceMonitor:
   enabled: false
   interval: 30s
   scrapeTimeout: 10s
   labels: {}
-  # Additional labels to add to the ServiceMonitor
   additionalLabels: {}
-  # Prometheus instance selector
-  # matchLabels:
-  #   prometheus: kube-prometheus

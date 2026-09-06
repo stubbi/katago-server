@@ -1,87 +1,74 @@
+//! Error type for everything that can go wrong talking to KataGo.
+
 use thiserror::Error;
 
-#[derive(Error, Debug)]
-pub enum KatagoError {
-    #[error("Failed to start KataGo process: {0}")]
+/// Errors produced by the analysis engine.
+#[derive(Debug, Error)]
+pub enum EngineError {
+    /// KataGo could not be spawned (bad path, missing model, ...).
+    #[error("failed to start KataGo: {0}")]
     ProcessStartFailed(String),
 
-    #[error("KataGo process died unexpectedly")]
+    /// KataGo is not running (it exited, or was never started successfully).
+    #[error("KataGo process is not running")]
     ProcessDied,
 
-    #[error("Command timeout after {0} seconds")]
+    /// KataGo did not answer within the configured time.
+    #[error("KataGo did not respond within {0} seconds")]
     Timeout(u64),
 
-    #[error("Failed to parse KataGo response: {0}")]
-    #[allow(dead_code)] // May be useful for future error handling
-    ParseError(String),
+    /// KataGo rejected the query because of a problem in the request itself.
+    #[error("KataGo rejected the query: {message}")]
+    Rejected {
+        /// KataGo's error message.
+        message: String,
+        /// The request field KataGo complained about, when it said.
+        field: Option<String>,
+    },
 
-    #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
+    /// KataGo reported an error that was not attributable to the request.
+    #[error("KataGo returned an error: {0}")]
+    Katago(String),
 
+    /// KataGo produced output the server could not understand.
+    #[error("failed to parse KataGo response: {0}")]
+    Parse(String),
+
+    /// Writing to or reading from the KataGo process failed.
+    #[error("I/O error communicating with KataGo: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// JSON (de)serialisation failed.
     #[error("JSON error: {0}")]
-    JsonError(#[from] serde_json::Error),
+    Json(#[from] serde_json::Error),
 
-    #[allow(dead_code)]
-    #[error("Invalid GTP command: {0}")]
-    InvalidCommand(String),
-
-    #[allow(dead_code)]
-    #[error("KataGo returned error: {0}")]
-    ResponseError(String),
+    /// The engine is shutting down and accepts no new work.
+    #[error("engine is shutting down")]
+    ShuttingDown,
 }
 
-pub type Result<T> = std::result::Result<T, KatagoError>;
+/// Convenience alias.
+pub type Result<T> = std::result::Result<T, EngineError>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_process_start_failed_error() {
-        let error = KatagoError::ProcessStartFailed("test error".to_string());
+    fn messages_are_human_readable() {
         assert_eq!(
-            error.to_string(),
-            "Failed to start KataGo process: test error"
+            EngineError::Timeout(30).to_string(),
+            "KataGo did not respond within 30 seconds"
         );
-    }
-
-    #[test]
-    fn test_process_died_error() {
-        let error = KatagoError::ProcessDied;
-        assert_eq!(error.to_string(), "KataGo process died unexpectedly");
-    }
-
-    #[test]
-    fn test_timeout_error() {
-        let error = KatagoError::Timeout(30);
-        assert_eq!(error.to_string(), "Command timeout after 30 seconds");
-    }
-
-    #[test]
-    fn test_parse_error() {
-        let error = KatagoError::ParseError("invalid json".to_string());
         assert_eq!(
-            error.to_string(),
-            "Failed to parse KataGo response: invalid json"
+            EngineError::Rejected {
+                message: "Illegal move 1: D4".into(),
+                field: Some("moves".into()),
+            }
+            .to_string(),
+            "KataGo rejected the query: Illegal move 1: D4"
         );
-    }
-
-    #[test]
-    fn test_invalid_command_error() {
-        let error = KatagoError::InvalidCommand("bad command".to_string());
-        assert_eq!(error.to_string(), "Invalid GTP command: bad command");
-    }
-
-    #[test]
-    fn test_response_error() {
-        let error = KatagoError::ResponseError("error message".to_string());
-        assert_eq!(error.to_string(), "KataGo returned error: error message");
-    }
-
-    #[test]
-    fn test_io_error_conversion() {
-        let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let error: KatagoError = io_error.into();
-        assert!(error.to_string().contains("file not found"));
+        let io: EngineError = std::io::Error::new(std::io::ErrorKind::NotFound, "gone").into();
+        assert!(io.to_string().contains("gone"));
     }
 }

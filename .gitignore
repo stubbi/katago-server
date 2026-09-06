@@ -1,26 +1,21 @@
+# Build
 /target/
-# Cargo.lock should be committed for binary projects
-# /Cargo.lock
+
+# Local runtime files (copy the *.example files to create them)
+/config.toml
+/analysis_config.cfg
+/katago
+/katago.zip
+*.bin.gz
+*.txt.gz
+/analysis_logs/
+*.log
+
+# Editors and OS
+.vscode/
+.idea/
+*.iml
 *.swp
 *.swo
 *~
 .DS_Store
-.build-sha
-
-# KataGo files
-katago
-katago_eigen
-katago_cuda
-katago_opencl
-*.bin.gz
-*.txt.gz
-gtp_config.cfg
-config.toml
-
-# Logs
-*.log
-
-# IDE
-.vscode/
-.idea/
-*.iml

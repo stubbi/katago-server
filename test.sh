@@ -1,174 +1,98 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Smoke test against a running katago-server.
+# Usage: ./test.sh [http://host:port]   (or set KATAGO_SERVER_URL)
+#        READY_TIMEOUT=300 ./test.sh    seconds to wait for readiness (default 180)
+set -euo pipefail
 
-# Quick test script for the KataGo server V1 API
-# Usage: ./test.sh [host:port]
+BASE="${1:-${KATAGO_SERVER_URL:-http://localhost:2718}}"
+BASE="${BASE%/}"
+case "$BASE" in http://*|https://*) ;; *) BASE="http://${BASE}" ;; esac
+READY_TIMEOUT="${READY_TIMEOUT:-180}"
 
-HOST="${1:-localhost:2718}"
-
-echo "Testing KataGo Server V1 API at $HOST"
-echo "========================================"
-
-# Test 0: Server startup and process health check
-echo -e "\n0. Checking server startup:"
-echo -n "Waiting for server to be ready..."
-TIMEOUT=15
-ELAPSED=0
-while ! curl -s "http://$HOST/api/v1/health" > /dev/null 2>&1; do
-  if [ $ELAPSED -ge $TIMEOUT ]; then
-    echo " FAILED"
-    echo "ERROR: Server failed to start within $TIMEOUT seconds"
-    echo "This likely means the KataGo process crashed on startup."
-    echo "Check server logs for 'KataGo stdout closed' or stderr errors."
-    exit 1
-  fi
-  sleep 1
-  ELAPSED=$((ELAPSED + 1))
-  echo -n "."
+for tool in curl jq; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "error: $tool is required" >&2; exit 1; }
 done
-echo " OK"
 
-# Test 1: Health check
-echo -e "\n1. Health Check:"
-curl -s "http://$HOST/api/v1/health" | jq '.'
+pass=0
+fail=0
+ok()   { pass=$((pass + 1)); printf '  ok   %s\n' "$*"; }
+bad()  { fail=$((fail + 1)); printf '  FAIL %s\n' "$*"; }
+check() { # check <description> <shell test...>
+  local desc="$1"; shift
+  if "$@"; then ok "$desc"; else bad "$desc"; fi
+}
 
-# Test 2: Version info
-echo -e "\n2. Version Information:"
-curl -s "http://$HOST/api/v1/version" | jq '.'
+echo "Smoke testing ${BASE}"
 
-# Test 3: Analysis endpoint (basic)
-echo -e "\n3. Position Analysis (Basic):"
-ANALYSIS_RESPONSE=$(curl -s -X POST "http://$HOST/api/v1/analysis" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "moves": ["D4", "Q16"],
-    "komi": 7.5,
-    "rules": "chinese"
-  }')
-
-echo "$ANALYSIS_RESPONSE" | jq '.'
-
-# Test 4: Analysis with ownership
-echo -e "\n4. Position Analysis (with Ownership):"
-OWNERSHIP_RESPONSE=$(curl -s -X POST "http://$HOST/api/v1/analysis" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "moves": ["D4", "Q16", "R4"],
-    "komi": 7.5,
-    "rules": "chinese",
-    "includeOwnership": true
-  }')
-
-echo "$OWNERSHIP_RESPONSE" | jq '.'
-
-# Validate the response
-echo -e "\n4a. Validating analysis response:"
-
-# Check moveInfos exists
-HAS_MOVE_INFOS=$(echo "$OWNERSHIP_RESPONSE" | jq 'has("moveInfos")')
-echo -n "  - Has moveInfos: $HAS_MOVE_INFOS ... "
-if [ "$HAS_MOVE_INFOS" == "true" ]; then
-  echo "✓ PASS"
-else
-  echo "✗ FAIL"
-  echo "ERROR: Response should contain moveInfos"
-  exit 1
-fi
-
-# Check rootInfo exists
-HAS_ROOT_INFO=$(echo "$OWNERSHIP_RESPONSE" | jq 'has("rootInfo")')
-echo -n "  - Has rootInfo: $HAS_ROOT_INFO ... "
-if [ "$HAS_ROOT_INFO" == "true" ]; then
-  echo "✓ PASS"
-else
-  echo "✗ FAIL"
-  echo "ERROR: Response should contain rootInfo"
-  exit 1
-fi
-
-# Check ownership array exists and has correct length
-if [ "$HAS_MOVE_INFOS" == "true" ]; then
-  HAS_OWNERSHIP=$(echo "$OWNERSHIP_RESPONSE" | jq 'has("ownership")')
-  echo -n "  - Has ownership data: $HAS_OWNERSHIP ... "
-  if [ "$HAS_OWNERSHIP" == "true" ]; then
-    echo "✓ PASS"
-
-    OWNERSHIP_COUNT=$(echo "$OWNERSHIP_RESPONSE" | jq '.ownership | length')
-    echo -n "  - Ownership values count: $OWNERSHIP_COUNT (expected: 361) ... "
-    if [ "$OWNERSHIP_COUNT" -eq 361 ]; then
-      echo "✓ PASS"
-    else
-      echo "✗ FAIL"
-      echo "ERROR: Expected 361 ownership values for 19x19 board, got $OWNERSHIP_COUNT"
-      exit 1
-    fi
-  else
-    echo "✗ FAIL"
-    echo "ERROR: Response should contain ownership data when includeOwnership is true"
+echo "waiting for /api/v1/health/ready (up to ${READY_TIMEOUT}s)"
+elapsed=0
+until [ "$(curl -s -o /dev/null -w '%{http_code}' "${BASE}/api/v1/health/ready")" = "200" ]; do
+  if [ "$elapsed" -ge "$READY_TIMEOUT" ]; then
+    echo "error: server not ready after ${READY_TIMEOUT}s" >&2
+    curl -s "${BASE}/api/v1/health" || true
     exit 1
   fi
-fi
+  sleep 2
+  elapsed=$((elapsed + 2))
+done
+ok "ready after ~${elapsed}s"
 
-# Check rootInfo values
-WINRATE=$(echo "$OWNERSHIP_RESPONSE" | jq '.rootInfo.winrate')
-SCORE_LEAD=$(echo "$OWNERSHIP_RESPONSE" | jq '.rootInfo.scoreLead')
+echo "GET /api/v1/health"
+health="$(curl -sf "${BASE}/api/v1/health")"
+check "status is healthy" test "$(jq -r .status <<<"$health")" = "healthy"
+check "katago.ready is true" test "$(jq -r .katago.ready <<<"$health")" = "true"
 
-echo -n "  - Winrate is valid: $WINRATE ... "
-if [ "$WINRATE" != "null" ] && awk "BEGIN {exit !($WINRATE >= 0.0 && $WINRATE <= 1.0)}"; then
-  echo "✓ PASS"
-else
-  echo "✗ FAIL"
-  echo "ERROR: Winrate should be between 0.0 and 1.0"
-  exit 1
-fi
+echo "GET /api/v1/version"
+version="$(curl -sf "${BASE}/api/v1/version")"
+check "server.name" test "$(jq -r .server.name <<<"$version")" = "katago-server"
+check "katago.version present" test "$(jq -r '.katago.version // empty' <<<"$version")" != ""
+echo "       server $(jq -r .server.version <<<"$version"), katago $(jq -r .katago.version <<<"$version"), model $(jq -r .model.name <<<"$version")"
 
-echo -n "  - Score lead is not null: $SCORE_LEAD ... "
-if [ "$SCORE_LEAD" != "null" ]; then
-  echo "✓ PASS"
-else
-  echo "✗ FAIL"
-  echo "ERROR: Score lead should not be null"
-  exit 1
-fi
+echo "POST /api/v1/analysis"
+analysis="$(curl -sf -X POST "${BASE}/api/v1/analysis" -H 'Content-Type: application/json' \
+  -d '{"requestId":"smoke-1","moves":["D4","Q16","R4"],"komi":7.5,"rules":"chinese","boardXSize":19,"boardYSize":19,"maxVisits":10,"includeOwnership":true,"includePolicy":true}')"
+check "id echoed" test "$(jq -r .id <<<"$analysis")" = "smoke-1"
+check "turnNumber is 3" test "$(jq -r .turnNumber <<<"$analysis")" = "3"
+check "moveInfos non-empty" test "$(jq '.moveInfos | length' <<<"$analysis")" -gt 0
+check "rootInfo.winrate in [0,1]" jq -e '.rootInfo.winrate >= 0 and .rootInfo.winrate <= 1' <<<"$analysis" >/dev/null
+check "ownership has 361 values" test "$(jq '.ownership | length' <<<"$analysis")" = "361"
+check "policy has 362 values" test "$(jq '.policy | length' <<<"$analysis")" = "362"
+echo "       best move $(jq -r .moveInfos[0].moveCoord <<<"$analysis"), winrate $(jq -r .rootInfo.winrate <<<"$analysis")"
 
-# Test 5: Error handling (invalid request)
-echo -e "\n5. Error Handling (Invalid Request):"
-ERROR_RESPONSE=$(curl -s -X POST "http://$HOST/api/v1/analysis" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "invalid": "request"
-  }')
+echo "POST /api/v1/analysis (9x9)"
+small="$(curl -sf -X POST "${BASE}/api/v1/analysis" -H 'Content-Type: application/json' \
+  -d '{"moves":["E5","C3"],"boardXSize":9,"boardYSize":9,"maxVisits":5,"includeOwnership":true}')"
+check "ownership has 81 values" test "$(jq '.ownership | length' <<<"$small")" = "81"
 
-echo "$ERROR_RESPONSE" | jq '.'
+echo "POST /api/v1/analysis/game"
+game="$(curl -sf -X POST "${BASE}/api/v1/analysis/game" -H 'Content-Type: application/json' \
+  -d '{"moves":["D4","Q16","R4"],"maxVisits":5}')"
+check "turns count is moves+1 (4)" test "$(jq '.turns | length' <<<"$game")" = "4"
+check "turns ordered by turnNumber" test "$(jq -c '[.turns[].turnNumber]' <<<"$game")" = "[0,1,2,3]"
 
-# Validate error response format (RFC 7807)
-echo -e "\n5a. Validating error response format:"
-HAS_TYPE=$(echo "$ERROR_RESPONSE" | jq 'has("type")')
-HAS_TITLE=$(echo "$ERROR_RESPONSE" | jq 'has("title")')
-HAS_STATUS=$(echo "$ERROR_RESPONSE" | jq 'has("status")')
+echo "POST /api/v1/analysis (invalid)"
+tmp_headers="$(mktemp)"
+bad_body="$(curl -s -D "$tmp_headers" -o - -X POST "${BASE}/api/v1/analysis" -H 'Content-Type: application/json' \
+  -d '{"moves":["D4","Z99"]}')"
+check "status 400" grep -qi '^HTTP/[0-9.]* 400' "$tmp_headers"
+check "content-type application/problem+json" grep -qi '^content-type: application/problem+json' "$tmp_headers"
+check "problem has field" test "$(jq -r '.field // empty' <<<"$bad_body")" = "moves"
+check "problem has type/title/detail" jq -e '.type and .title and .detail' <<<"$bad_body" >/dev/null
+rm -f "$tmp_headers"
 
-echo -n "  - Has 'type' field (RFC 7807): $HAS_TYPE ... "
-if [ "$HAS_TYPE" == "true" ]; then
-  echo "✓ PASS"
-else
-  echo "⚠ WARNING (expected RFC 7807 format)"
-fi
+echo "GET /metrics"
+metrics="$(curl -sf "${BASE}/metrics")"
+check "contains http_requests_total" grep -q 'http_requests_total' <<<"$metrics"
+check "contains katago_engine_up" grep -q 'katago_engine_up' <<<"$metrics"
 
-echo -n "  - Has 'title' field (RFC 7807): $HAS_TITLE ... "
-if [ "$HAS_TITLE" == "true" ]; then
-  echo "✓ PASS"
-else
-  echo "⚠ WARNING (expected RFC 7807 format)"
-fi
+echo "GET /api/v1/openapi.json"
+openapi="$(curl -sf "${BASE}/api/v1/openapi.json")"
+check "has /api/v1/analysis path" jq -e '.paths["/api/v1/analysis"]' <<<"$openapi" >/dev/null
+check "has /api/v1/analysis/game path" jq -e '.paths["/api/v1/analysis/game"]' <<<"$openapi" >/dev/null
 
-echo -n "  - Has 'status' field (RFC 7807): $HAS_STATUS ... "
-if [ "$HAS_STATUS" == "true" ]; then
-  echo "✓ PASS"
-else
-  echo "⚠ WARNING (expected RFC 7807 format)"
-fi
+echo "GET /docs"
+check "docs served" test "$(curl -s -o /dev/null -w '%{http_code}' "${BASE}/docs")" = "200"
 
-echo -e "\n========================================"
-echo "All core tests PASSED! ✓"
-echo ""
-echo "Note: The error format warnings are non-critical but indicate"
-echo "      that error responses should follow RFC 7807 format."
+echo
+echo "${pass} passed, ${fail} failed"
+[ "$fail" -eq 0 ]

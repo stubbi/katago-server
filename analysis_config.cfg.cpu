@@ -1,8 +1,8 @@
 # KataGo Analysis Engine Configuration - CPU optimized
 # For use with "katago analysis" command
 
-# Logging
-logDir = analysis_logs
+# Logging: to stderr only (captured by katago-server), no log files on disk
+logToStderr = true
 logSearchInfo = false
 logAllRequests = false
 logAllResponses = false

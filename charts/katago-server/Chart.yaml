@@ -1,31 +1,29 @@
 apiVersion: v2
 name: katago-server
-description: A Helm chart for KataGo Server - High-performance REST API server for KataGo
+description: REST API server for the KataGo Go engine - position and game analysis over HTTP
 type: application
 
-# This is the chart version. This version number should be incremented each time you make changes
-# to the chart and its templates, including the app version.
+# Chart version. Bumping this on main triggers a release of the Docker images,
+# the chart and a git tag (see RELEASING.md). Keep it equal to appVersion.
+version: 1.8.0
 
-version: 1.7.4
-
-# This is the version number of the application being deployed.
-# Fix: use correct player color for moves in handicap games
-appVersion: "1.7.4"
-
+# Version of katago-server deployed by this chart. Must match Cargo.toml.
+appVersion: "1.8.0"
 
 keywords:
   - katago
   - go
-  - game
+  - baduk
+  - weiqi
   - ai
   - rest-api
 
-home: https://github.com/stubbi/katago-server
+home: https://github.com/goban-app/katago-server
 sources:
-  - https://github.com/stubbi/katago-server
+  - https://github.com/goban-app/katago-server
 
 maintainers:
-  - name: stubbi
-    url: https://github.com/stubbi
+  - name: goban-app
+    url: https://github.com/goban-app
 
 icon: https://raw.githubusercontent.com/lightvector/KataGo/master/images/icon.png
