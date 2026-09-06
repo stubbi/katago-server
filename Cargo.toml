@@ -24,7 +24,7 @@ path = "src/lib.rs"
 # Web framework and middleware
 axum = { version = "0.8", features = ["macros"] }
 tower = { version = "0.5", features = ["limit", "load-shed", "timeout", "util"] }
-tower-http = { version = "0.6", features = ["trace", "cors", "timeout", "limit", "request-id", "util"] }
+tower-http = { version = "0.7", features = ["trace", "cors", "timeout", "limit", "request-id", "util"] }
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "process", "signal"] }
