@@ -42,7 +42,7 @@ metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 
 # API documentation
-utoipa = { version = "5", features = ["axum_extras"] }
+utoipa = { version = "6", features = ["axum_extras"] }
 utoipa-scalar = { version = "0.3", features = ["axum"] }
 
 # Utilities
