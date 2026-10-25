@@ -53,7 +53,7 @@ and contains commented GPU and minimal services. Run `docker compose up -d`.
 ```bash
 helm repo add katago-server https://goban-app.github.io/katago-server
 helm repo update
-helm install katago katago-server/katago-server --version 1.8.0
+helm install katago katago-server/katago-server --version 1.8.1
 ```
 
 Useful values (see `charts/katago-server/values.yaml` for all):

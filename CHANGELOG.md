@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-10-25
+
+### Changed
+
+- Dependency updates: utoipa 6 and utoipa-scalar 0.4 (OpenAPI document and `/docs` page), tower-http 0.7, tokio 1.53.3, serde_json, toml, clap, thiserror, uuid, and GitHub Actions.
+
 ## [1.8.0] - 2026-09-07
 
 A ground-up overhaul of the server, its packaging and its documentation.
@@ -53,5 +59,6 @@ A ground-up overhaul of the server, its packaging and its documentation.
 - The unused GTP bot module and its `regex` and `hyper` direct dependencies.
 - `EXAMPLES.md` (see `docs/clients.md`); the `reportDuringSearchEvery` request field, which was never honoured.
 
-[Unreleased]: https://github.com/goban-app/katago-server/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/goban-app/katago-server/compare/v1.8.1...HEAD
+[1.8.1]: https://github.com/goban-app/katago-server/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/goban-app/katago-server/compare/v1.7.4...v1.8.0

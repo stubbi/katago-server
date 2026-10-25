@@ -5,10 +5,10 @@ type: application
 
 # Chart version. Bumping this on main triggers a release of the Docker images,
 # the chart and a git tag (see RELEASING.md). Keep it equal to appVersion.
-version: 1.8.0
+version: 1.8.1
 
 # Version of katago-server deployed by this chart. Must match Cargo.toml.
-appVersion: "1.8.0"
+appVersion: "1.8.1"
 
 keywords:
   - katago
