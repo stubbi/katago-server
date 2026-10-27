@@ -1,6 +1,6 @@
 [package]
 name = "katago-server"
-version = "1.8.0"
+version = "1.8.1"
 edition = "2024"
 rust-version = "1.88"
 description = "Production-grade REST API server for the KataGo Go engine"
