@@ -142,7 +142,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
       - uses: azure/setup-helm@v5
-      - uses: helm/chart-releaser-action@v1.7.0
+      - uses: helm/chart-releaser-action@v1.8.0
         with:
           charts_dir: charts
           skip_existing: true
